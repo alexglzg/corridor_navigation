@@ -1,0 +1,2 @@
+int32 from_corridor
+int32 to_corridor
