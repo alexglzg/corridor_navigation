@@ -4,8 +4,8 @@ from nav_msgs.msg import OccupancyGrid
 import numpy as np
 import cv2
 
-from corridor_gen.core.linemap import LineMap
-from corridor_gen.core.graph import Graph
+from .core.linemap import LineMap
+from .core.graph import Graph
 
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
