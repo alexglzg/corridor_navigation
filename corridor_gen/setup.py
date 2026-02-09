@@ -24,6 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            # Package.File:Function
+            'corridor_generator_node = corridor_gen.corridor_generator_node:main'
         ],
     },
 )
