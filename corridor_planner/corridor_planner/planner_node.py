@@ -43,16 +43,20 @@ class PlannerNode(Node):
                 ('omega_max', 2.0),
                 ('robot_width', 0.34),
                 ('robot_length', 0.237),
+                ('robot_wheelbase', 0.25),
+                ('robot_delta_max', 0.5),
                 ('model_type', 'unicycle'),
                 ('sampling_dt', 0.100),
                 ('map_frame', 'map')
             ]
         )
-
+    
         self.v_max = self.get_parameter('v_max').value
         self.w_max = self.get_parameter('omega_max').value
         self.robot_width = self.get_parameter('robot_width').value
         self.robot_length = self.get_parameter('robot_length').value
+        self.robot_wheelbase = self.get_parameter('robot_wheelbase').value
+        self.delta_max = self.get_parameter('robot_delta_max').value
         self.model_type = self.get_parameter('model_type').value.lower()
         self.dt = self.get_parameter('sampling_dt').value
         self.map_frame = self.get_parameter('map_frame').value
@@ -123,7 +127,11 @@ class PlannerNode(Node):
                     omega_max=self.w_max, omega_min=-self.w_max
                 )
             elif self.model_type == 'bicycle':
-                return arena.Bicycle(state=[0.0]*3, v_max=self.v_max, width=self.robot_width, length=self.robot_length)
+                return arena.Bicycle(
+                    state=[0.0]*3, width=self.robot_width, length=self.robot_length,
+                    wheelbase=self.robot_wheelbase, v_max=self.v_max, v_min=-self.v_max,
+                    delta_max=self.delta_max, delta_min=-self.delta_max
+                )
             else:
                 self.get_logger().fatal(f"Unknown model_type: {self.model_type}")
                 return None
