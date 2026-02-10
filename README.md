@@ -37,6 +37,9 @@ git clone [https://github.com/alexglzg/corridor_navigation.git](https://github.c
 2. **Install dependencies and build:**
 
 ```bash
+cd ~/corridor_ws/src/corridor_navigation
+pip install -r requirements.txt
+
 cd ~/corridor_ws
 rosdep install --from-paths src --ignore-src -r -y
 colcon build --symlink-install
@@ -46,7 +49,7 @@ source install/setup.bash
 
 ## Quick Start
 
-To launch the complete pipeline (Map Server, ACG Generator, Analytical Planner, and RViz):
+To launch the complete pipeline (Map Server, Corridor Generator, Motion Planner, and RViz):
 
 ```bash
 ros2 launch corridor_bringup full_system.launch.py

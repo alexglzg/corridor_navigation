@@ -1,0 +1,6 @@
+numpy
+opencv-python
+shapely
+networkx
+scipy
+matplotlib
