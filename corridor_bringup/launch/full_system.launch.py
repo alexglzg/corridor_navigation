@@ -39,7 +39,16 @@ def generate_launch_description():
             package='corridor_planner',
             executable='planner_node',
             name='corridor_planner',
-            parameters=[{'v_max': 0.5, 'omega_max': 2.0}]
+            output='screen',
+            parameters=[{
+                'v_max': 0.5,             
+                'omega_max': 2.0,         
+                'robot_width': 0.34,      
+                'robot_length': 0.237,    
+                'model_type': 'unicycle', 
+                'sampling_dt': 0.100,    
+                'map_frame': 'map'
+            }]
         ),
 
         Node(
