@@ -11,8 +11,8 @@ from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
 from std_msgs.msg import ColorRGBA, Empty
 import math
-from corridor_navigation_msgs.msg import Corridor, Edge as EdgeMsg, Graph as GraphMsg
-from corridor_navigation_msgs.srv import GetGraph
+from corridor_navigation_interfaces.msg import Corridor, Edge as EdgeMsg, Graph as GraphMsg
+from corridor_navigation_interfaces.srv import GetGraph
 
 class CorridorGenerator(Node):
     def __init__(self):

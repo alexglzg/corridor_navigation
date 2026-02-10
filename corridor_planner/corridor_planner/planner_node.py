@@ -3,7 +3,7 @@ from rclpy.node import Node
 from std_msgs.msg import Empty, Float64MultiArray
 from geometry_msgs.msg import Point, PoseStamped, Quaternion, PoseWithCovarianceStamped
 from visualization_msgs.msg import Marker, MarkerArray
-from corridor_navigation_msgs.srv import GetGraph
+from corridor_navigation_interfaces.srv import GetGraph
 import networkx as nx
 import math
 import tf_transformations
