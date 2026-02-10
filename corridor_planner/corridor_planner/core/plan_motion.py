@@ -11,10 +11,10 @@ import numpy as np
 import arena
 from math import pi, cos, sin
 
-class PlanMotion(Node):
-    def __init__(self):
-        super().__init__('plan_motion')
+class PlanMotion():
+    def __init__(self, logger):
 
+        self.logger = logger
         self.corridor_list = None
         self.vehicle = None
         self.motion_planner = None
@@ -41,23 +41,19 @@ class PlanMotion(Node):
 
         self.motion_planner = arena.MotionPlanner(self.vehicle, [corridor1, corridor2], [0]*3, [0]*3)
 
-        self.get_logger().info("[PlanMotion] Planner initialized")
+        # self.get_logger().info("[PlanMotion] Planner initialized")
 
     def plan_motion(self, corridor_list, vehicle_start_pose, vehicle_end_pose, waypoint_list = None):
         if self.motion_planner is None:
-            self.get_logger().error("Planner not initialized, please run initialize_planner(...) first.")
+            # self.get_logger().error("Planner not initialized, please run initialize_planner(...) first.")
             return
 
         debug = False
         self.motion_planner.update(vehicle = self.vehicle, corridor_list = corridor_list, start_pose = vehicle_start_pose, end_pose = vehicle_end_pose, waypoints = waypoint_list[1:-1] if waypoint_list is not None else None)
 
-        if debug:
-            figure = self.motion_planner.plot_planner_inputs()
-            plt.show(block = True)
-
         if len(corridor_list) > 1:
             trajectory, intersection_detected = self.motion_planner.compute_trajectory_analytical(), False
-            self.get_logger().info(f"Analytical solution computed in {self.motion_planner.comp_time_analytical_sol*1000:.1f} ms")
+            # self.get_logger().info(f"Analytical solution computed in {self.motion_planner.comp_time_analytical_sol*1000:.1f} ms")
 
             if debug:
                 figure = arena.plot_corridors(corridor_list = corridor_list, linestyle = '--', color = 'gray', linewidth = 0.5)
@@ -70,17 +66,7 @@ class PlanMotion(Node):
                 for trajectory_piece in trajectory:
                     if isinstance(trajectory_piece, arena.TurnOnTheSpot):
                         print(f'\n\nTurn {trajectory_piece.turn_direction} for {trajectory_piece.maneuver_time}s of {trajectory_piece.delta_angle * 180 / pi} degrees ')
-                    print(f'\nPrimitive type: {trajectory_piece.label}')
-
-
-                plt.plot(vehicle_start_pose[0], vehicle_start_pose[1], 'ro')
-                plt.plot(vehicle_end_pose[0], vehicle_end_pose[1], 'ro')
-
-                plt.arrow(vehicle_start_pose[0], vehicle_start_pose[1], 0.5*cos(vehicle_start_pose[2]), 0.5*sin(vehicle_start_pose[2]), head_width = 0.1, head_length = 0.1, fc = 'r', ec = 'r')
-                plt.arrow(vehicle_end_pose[0], vehicle_end_pose[1], 0.5*cos(vehicle_end_pose[2]), 0.5*sin(vehicle_end_pose[2]), head_width = 0.1, head_length = 0.1, fc = 'r', ec = 'r')
-
-                plt.show(block = True)
-
+                
         elif len(corridor_list) == 1:
             trajectory, intersection_detected = self.motion_planner.compute_trajectory_ocp_one_corridor(), False
             t0 = trajectory.t0
@@ -101,8 +87,8 @@ class PlanMotion(Node):
 
             return path, control_path, trajectory, intersection_detected
 
-        else:
-            self.get_logger().error("You should provide at least one corridor to the planner")
+        # else:
+            # self.get_logger().error("You should provide at least one corridor to the planner")
 
         path = np.empty((0,3))
         control_path = np.empty((0,2))  

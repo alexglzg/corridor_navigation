@@ -1,5 +1,6 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy
 from std_msgs.msg import Empty, Float64MultiArray
 from geometry_msgs.msg import Point, PoseStamped, Quaternion, PoseWithCovarianceStamped
 from visualization_msgs.msg import Marker, MarkerArray
@@ -31,7 +32,7 @@ class TransitionRegion:
 
 class PlannerNode(Node):
     def __init__(self):
-        super().__init__('arena_planner')
+        super().__init__('corridor_planner_node')
 
         self.PLANNING_DT = 0.100
 
@@ -59,6 +60,8 @@ class PlannerNode(Node):
         while not self.cli.wait_for_service(timeout_sec=1.0):
             self.get_logger().info('Waiting for /get_graph service...')
 
+        self.request_graph()
+
         # Subscribers
         self.create_subscription(Empty, '/floorplan_updated', self.floorplan_updated_callback, 10)
         self.create_subscription(Point, '/initial_point', self.initial_point_callback, 10)
@@ -78,11 +81,16 @@ class PlannerNode(Node):
         self.planned_path_publisher = self.create_publisher(Path, '/rosbot2pro/planned_path', 10)
 
         self.get_logger().info("PlannerNode initialized.")
-        self.plan_motion_node = PlanMotion()
+        self.plan_motion_node = PlanMotion(self.get_logger())
         self.plan_motion_node.initialize_planner(
             # vehicle = arena.Unicycle(state = [0]*3, width = 0.237, length = 0.237, v_max = ROSBOT_V_MAX, v_min = -ROSBOT_V_MAX, omega_max = ROSBOT_OMEGA_MAX, omega_min = -ROSBOT_OMEGA_MAX), sampling_time=self.PLANNING_DT
             vehicle = arena.Unicycle(state = [0]*3, width = 0.34, length = 0.237, v_max = ROSBOT_V_MAX, v_min = -ROSBOT_V_MAX, omega_max = ROSBOT_OMEGA_MAX, omega_min = -ROSBOT_OMEGA_MAX), sampling_time=self.PLANNING_DT
         )        
+
+    def request_graph(self):
+        req = GetGraph.Request()
+        future = self.cli.call_async(req)
+        future.add_done_callback(self.on_graph_response)
 
     def floorplan_updated_callback(self, _):
         self.get_logger().info("Received /floorplan_updated signal. Requesting graph...")
@@ -1160,7 +1168,7 @@ class PlannerNode(Node):
 
             marker.scale.x = node['width']
             marker.scale.y = node['height']
-            marker.scale.z = 0.02
+            marker.scale.z = 0.05
 
             # Simple gradient coloring
             t = i / max(len(path_ids) - 1, 1)
@@ -1172,7 +1180,7 @@ class PlannerNode(Node):
             # Pose
             marker.pose.position.x = node['pos'][0]
             marker.pose.position.y = node['pos'][1]
-            marker.pose.position.z = 0.0
+            marker.pose.position.z = 0.025
             quat = tf_transformations.quaternion_from_euler(0, 0, node['yaw'])
             marker.pose.orientation = Quaternion(x=quat[0], y=quat[1], z=quat[2], w=quat[3])
 

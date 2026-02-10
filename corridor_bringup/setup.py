@@ -17,6 +17,7 @@ setup(
         (os.path.join('share', package_name, 'maps/small_rooms'), glob('maps/small_rooms/*')),
         (os.path.join('share', package_name, 'maps/testmaps'), glob('maps/testmaps/*')),
         (os.path.join('share', package_name, 'params'), glob('params/*.yaml')),
+        (os.path.join('share', package_name, 'rviz'), glob('rviz/*.rviz')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,

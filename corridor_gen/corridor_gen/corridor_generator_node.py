@@ -1,5 +1,6 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy
 from nav_msgs.msg import OccupancyGrid
 import numpy as np
 import cv2
@@ -26,11 +27,13 @@ class CorridorGenerator(Node):
         self.robot_clearance = self.get_parameter('robot_clearance').get_parameter_value().double_value
         self.debug_mode = self.get_parameter('debug_mode').get_parameter_value().bool_value
 
+        qos_profile = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+
         self.subscription = self.create_subscription(
             OccupancyGrid,
             '/map',
             self.map_callback,
-            10
+            qos_profile
         )
 
         self.marker_pub = self.create_publisher(MarkerArray, '/floorplan_markers', 10)        
