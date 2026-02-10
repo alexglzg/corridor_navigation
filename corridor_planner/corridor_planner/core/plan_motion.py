@@ -57,7 +57,7 @@ class PlanMotion:
         try:
             if len(corridor_list) > 1:
                 trajectory = self.motion_planner.compute_trajectory_analytical()
-                # Original logic hardcodes intersection_detected to False on success
+                # TODO: Bicycle error: Trajectory generation error: 'list' object has no attribute 'maneuver_time'
                 intersection_detected = False
             elif len(corridor_list) == 1:
                 trajectory = self.motion_planner.compute_trajectory_ocp_one_corridor()

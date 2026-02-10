@@ -7,8 +7,10 @@ from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
 
+    # map_file = os.path.join(get_package_share_directory('corridor_bringup'), 
+    #                         'maps/small_rooms', 'room_map_8.yaml')
     map_file = os.path.join(get_package_share_directory('corridor_bringup'), 
-                            'maps/small_rooms', 'room_map_8.yaml')
+                            'maps/large_rooms', 'map_7.yaml')
     rviz_config_path = os.path.join(get_package_share_directory('corridor_bringup'), 
                                     'rviz', 'corridors.rviz')
 
@@ -34,6 +36,23 @@ def generate_launch_description():
             name='corridor_generator',
             parameters=[{'robot_clearance': 0.3}]
         ),
+
+        # Node(
+        #     package='corridor_planner',
+        #     executable='planner_node',
+        #     name='corridor_planner',
+        #     output='screen',
+        #     parameters=[{
+        #         'v_max': 1.0,         
+        #         'robot_width': 0.430,      
+        #         'robot_length': 0.508,    
+        #         'robot_wheelbase': 0.4,
+        #         'robot_delta_max': 0.5,
+        #         'model_type': 'bicycle', 
+        #         'sampling_dt': 0.100,    
+        #         'map_frame': 'map'
+        #     }]
+        # ),
 
         Node(
             package='corridor_planner',
