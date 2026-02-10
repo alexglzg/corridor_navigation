@@ -76,7 +76,7 @@ ros2 launch corridor_bringup full_system.launch.py
 
 ## Citation
 
-An arXiv preprint of the ICRA 2026 paper will be linked here shortly.
+An arXiv preprint will be linked here shortly.
 
 ```bibtex
 @inproceedings{gonzalez2026fast,
