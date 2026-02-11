@@ -75,8 +75,19 @@ ros2 launch corridor_bringup full_system.launch.py
 * `corridor_bringup`: Centralized launch files, map datasets, and RViz configurations.
 
 ## Citation
+```bibtex
+@misc{gonzalezgarcia2026fastmotionplanningnonholonomic,
+      title={Fast Motion Planning for Non-Holonomic Mobile Robots via a Rectangular Corridor Representation of Structured Environments}, 
+      author={Alejandro Gonzalez-Garcia and Sebastiaan Wyns and Sonia De Santis and Jan Swevers and Wilm Decré},
+      year={2026},
+      eprint={2602.09714},
+      archivePrefix={arXiv},
+      primaryClass={cs.RO},
+      url={https://arxiv.org/abs/2602.09714}, 
+}
 
-An arXiv preprint will be linked here shortly.
+```
+
 
 ```bibtex
 @inproceedings{gonzalez2026fast,
