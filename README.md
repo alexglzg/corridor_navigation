@@ -87,18 +87,6 @@ ros2 launch corridor_bringup full_system.launch.py
 }
 
 ```
-
-
-```bibtex
-@inproceedings{gonzalez2026fast,
-  title={Fast Motion Planning for Non-Holonomic Mobile Robots via a Rectangular Corridor Representation of Structured Environments},
-  author={Gonzalez-Garcia, Alejandro and Wyns, Sebastiaan and De Santis, Sonia and Swevers, Jan and Decr{\'e}, Wilm},
-  booktitle={IEEE International Conference on Robotics and Automation (ICRA)},
-  year={2026}
-}
-
-```
-
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
