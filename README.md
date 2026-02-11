@@ -76,14 +76,15 @@ ros2 launch corridor_bringup full_system.launch.py
 
 ## Citation
 
-An arXiv preprint of the ICRA 2026 paper will be linked here shortly.
-
 ```bibtex
-@inproceedings{gonzalez2026fast,
-  title={Fast Motion Planning for Non-Holonomic Mobile Robots via a Rectangular Corridor Representation of Structured Environments},
-  author={Gonzalez-Garcia, Alejandro and Wyns, Sebastiaan and De Santis, Sonia and Swevers, Jan and Decr{\'e}, Wilm},
-  booktitle={IEEE International Conference on Robotics and Automation (ICRA)},
-  year={2026}
+@misc{gonzalezgarcia2026fastmotionplanningnonholonomic,
+      title={Fast Motion Planning for Non-Holonomic Mobile Robots via a Rectangular Corridor Representation of Structured Environments}, 
+      author={Alejandro Gonzalez-Garcia and Sebastiaan Wyns and Sonia De Santis and Jan Swevers and Wilm Decré},
+      year={2026},
+      eprint={2602.09714},
+      archivePrefix={arXiv},
+      primaryClass={cs.RO},
+      url={https://arxiv.org/abs/2602.09714}, 
 }
 
 ```
