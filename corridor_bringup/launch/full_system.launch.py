@@ -7,24 +7,24 @@ from launch.substitutions import LaunchConfiguration
 
 def generate_launch_description():
 
-    # map_file = os.path.join(get_package_share_directory('corridor_bringup'), 
-    #                         'maps/small_rooms', 'room_map_8.yaml')
-    # map_file = os.path.join(get_package_share_directory('corridor_bringup'), 
-    #                         'maps/large_rooms', 'map_7.yaml')
-    map_file = os.path.join(get_package_share_directory('corridor_bringup'), 
+    bringup_dir = get_package_share_directory('corridor_bringup')
+    map_file = os.path.join(bringup_dir, 
                             'maps/large_rooms', 'structured_map_20.yaml') 
+    params_file = os.path.join(bringup_dir, 'params', 'corridor_system_params.yaml')
     
-    rviz_config_path = os.path.join(get_package_share_directory('corridor_bringup'), 
+    rviz_config_path = os.path.join(bringup_dir, 
                                     'rviz', 'corridors.rviz')
 
     return LaunchDescription([
-        DeclareLaunchArgument('map_yaml', default_value=map_file),
+        DeclareLaunchArgument('map_yaml', default_value=map_file, description='Path to the map yaml file'),
+        DeclareLaunchArgument('params_file', default_value=params_file, description='Path to the ROS2 parameters file'),
 
         Node(
             package='nav2_map_server',
             executable='map_server',
             name='map_server',
-            parameters=[{'yaml_filename': map_file}, {'frame_id': 'map'}]
+            parameters=[LaunchConfiguration('params_file'),
+                        {'yaml_filename': LaunchConfiguration('map_yaml')}]
         ),
         Node(
             package='nav2_lifecycle_manager',
@@ -37,7 +37,7 @@ def generate_launch_description():
             package='corridor_gen',
             executable='corridor_generator_node',
             name='corridor_generator',
-            parameters=[{'robot_clearance': 0.3}]
+            parameters=[LaunchConfiguration('params_file')]
         ),
 
         # Node(
@@ -62,15 +62,7 @@ def generate_launch_description():
             executable='planner_node',
             name='corridor_planner',
             output='screen',
-            parameters=[{
-                'v_max': 0.5,             
-                'omega_max': 2.0,         
-                'robot_width': 0.34,      
-                'robot_length': 0.237,    
-                'model_type': 'unicycle', 
-                'sampling_dt': 0.100,    
-                'map_frame': 'map'
-            }]
+            parameters=[LaunchConfiguration('params_file')]
         ),
 
         Node(
@@ -80,3 +72,9 @@ def generate_launch_description():
             arguments=['-d', rviz_config_path]
         )
     ])
+
+
+# ros2 launch corridor_bringup full_system.launch.py map_yaml:=/home/alex/arena_ws/src/corridor_bringup/maps/small_rooms/structured_map_2.yaml
+# ros2 launch corridor_bringup full_system.launch.py map_yaml:=/home/alex/arena_ws/src/corridor_bringup/maps/small_rooms/structured_rows.yaml
+# ros2 launch corridor_bringup full_system.launch.py map_yaml:=/home/alex/arena_ws/src/corridor_bringup/maps/large_rooms/structured_rows_20.yaml
+# ros2 launch corridor_bringup full_system.launch.py map_yaml:=/home/alex/arena_ws/src/corridor_bringup/maps/large_rooms/map_2.yaml
