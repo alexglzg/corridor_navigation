@@ -36,3 +36,6 @@ env/
 .DS_Store
 .AppleDouble
 .LSOverride
+
+# Large Datasets
+Corridor-MapDataset
