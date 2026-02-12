@@ -1,5 +1,5 @@
 free_thresh: 0.2
-image: rows_20.pgm
+image: structured_rows_20.pgm
 negate: 0
 occupied_thresh: 0.5
 origin:

@@ -1,0 +1,17 @@
+map_server:
+  ros__parameters:
+    frame_id: "map"
+
+corridor_generator:
+  ros__parameters:
+    robot_clearance: 0.3
+
+corridor_planner:
+  ros__parameters:
+    v_max: 0.5
+    omega_max: 2.0
+    robot_width: 0.34
+    robot_length: 0.237
+    model_type: "unicycle"
+    sampling_dt: 0.100
+    map_frame: "map"
