@@ -37,6 +37,11 @@ env/
 .AppleDouble
 .LSOverride
 
+<<<<<<< HEAD
 
 # Large datasets
 Corridor-MapDataset/
+=======
+# Large Datasets
+Corridor-MapDataset
+>>>>>>> cb6ed0b (gitignore)
