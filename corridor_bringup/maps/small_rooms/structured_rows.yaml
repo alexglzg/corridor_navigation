@@ -1,0 +1,9 @@
+free_thresh: 0.2
+image: structured_rows.pgm
+negate: 0
+occupied_thresh: 0.5
+origin:
+- -0.7
+- -1.2
+- 0.0
+resolution: 0.01

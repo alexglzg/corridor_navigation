@@ -5,7 +5,7 @@ from nav_msgs.msg import OccupancyGrid
 import numpy as np
 import cv2
 
-from .core.linemap import LineMap
+from .core.linemap_dev import LineMap
 from .core.graph import Graph
 
 from visualization_msgs.msg import Marker
@@ -79,7 +79,7 @@ class CorridorGenerator(Node):
         try:
             floor_plan = LineMap(image=image, threshold=THRESHOLD, debug=DEBUG, 
                                  resolution=resolution, robot_clearance=self.robot_clearance)
-            floor_plan.process()
+            floor_plan.process_slicing()
 
             self.clear_previous_markers()
             self.publish_floorplan_rectangles(floor_plan, height, resolution, origin)
