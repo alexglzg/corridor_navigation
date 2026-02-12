@@ -10,8 +10,9 @@ from linemap import LineMap
 # FILENAME = "Corridor-MapDataset/Scale Maps/Small Scale/room_map_2.pgm"
 # FILENAME = "Corridor-MapDataset/Scale Maps/Small Scale/room_map_10.pgm"
 # FILENAME = "Corridor-MapDataset/Scale Maps/Small Scale/few_rows.png"
-FILENAME = "Corridor-MapDataset/Scale Maps/Small Scale/structured_map_2.pgm"
+# FILENAME = "Corridor-MapDataset/Scale Maps/Small Scale/structured_map_2.pgm"
 # FILENAME = "Corridor-MapDataset/Scale Maps/Small Scale/structured_rows.pgm"
+FILENAME = "Corridor-MapDataset/Real Maps/gazebo_map/map.pgm"
 
 THRESHOLD = 250  # PNG
 
