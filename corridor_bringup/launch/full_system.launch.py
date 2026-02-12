@@ -9,8 +9,11 @@ def generate_launch_description():
 
     # map_file = os.path.join(get_package_share_directory('corridor_bringup'), 
     #                         'maps/small_rooms', 'room_map_8.yaml')
+    # map_file = os.path.join(get_package_share_directory('corridor_bringup'), 
+    #                         'maps/large_rooms', 'map_7.yaml')
     map_file = os.path.join(get_package_share_directory('corridor_bringup'), 
-                            'maps/large_rooms', 'map_7.yaml')
+                            'maps/large_rooms', 'structured_map_20.yaml') 
+    
     rviz_config_path = os.path.join(get_package_share_directory('corridor_bringup'), 
                                     'rviz', 'corridors.rviz')
 
