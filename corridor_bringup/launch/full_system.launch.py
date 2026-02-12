@@ -40,23 +40,6 @@ def generate_launch_description():
             parameters=[LaunchConfiguration('params_file')]
         ),
 
-        # Node(
-        #     package='corridor_planner',
-        #     executable='planner_node',
-        #     name='corridor_planner',
-        #     output='screen',
-        #     parameters=[{
-        #         'v_max': 1.0,         
-        #         'robot_width': 0.430,      
-        #         'robot_length': 0.508,    
-        #         'robot_wheelbase': 0.4,
-        #         'robot_delta_max': 0.5,
-        #         'model_type': 'bicycle', 
-        #         'sampling_dt': 0.100,    
-        #         'map_frame': 'map'
-        #     }]
-        # ),
-
         Node(
             package='corridor_planner',
             executable='planner_node',

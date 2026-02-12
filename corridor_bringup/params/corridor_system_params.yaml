@@ -6,6 +6,7 @@ corridor_generator:
   ros__parameters:
     robot_clearance: 0.3
 
+# For unicycle
 corridor_planner:
   ros__parameters:
     v_max: 0.5
@@ -15,3 +16,14 @@ corridor_planner:
     model_type: "unicycle"
     sampling_dt: 0.100
     map_frame: "map"
+
+# For bicycle
+# corridor_planner:
+#   ros__parameters:
+#     v_max: 1.0
+#     robot_delta_max: 0.5
+#     robot_width: 0.430
+#     robot_length: 0.508
+#     model_type: "bicycle"
+#     sampling_dt: 0.100
+#     map_frame: "map"
