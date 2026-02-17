@@ -290,6 +290,9 @@ class PlannerNode(Node):
         return [cid for cid, poly in self.corridor_polygons.items() if poly.contains(ShapelyPoint(point[0], point[1]))]
 
     def try_plan_path(self):
+        # Start timing for complete pipeline
+        pipeline_start = time.time()
+
         if self.G is None or not self.initial_point or not self.target_point: return
 
         start_cs = self.find_corridors_containing_point(self.initial_point)
@@ -307,6 +310,10 @@ class PlannerNode(Node):
                     waypoints = [self.initial_point, self.target_point]
                     self.publish_viz(waypoints, [cid])
                     self.execute_motion_planning([cid], waypoints, None, True)
+
+                    # Log total pipeline time
+                    pipeline_time = (time.time() - pipeline_start) * 1000
+                    self.get_logger().info(f"Complete planning pipeline completed in {pipeline_time:.2f} ms")
                     return
 
         temp = self.transition_graph.copy()
@@ -357,9 +364,14 @@ class PlannerNode(Node):
             
             self.publish_viz(waypoints, corridor_sequence)
             self.execute_motion_planning(corridor_sequence, waypoints, None, False)
-            
+
+            # Log total pipeline time (graph search + motion planning)
+            pipeline_time = (time.time() - pipeline_start) * 1000
+            self.get_logger().info(f"Complete planning pipeline completed in {pipeline_time:.2f} ms")
+
         except nx.NetworkXNoPath:
-            self.get_logger().warn("No path found.")
+            pipeline_time = (time.time() - pipeline_start) * 1000
+            self.get_logger().warn(f"No path found. (Pipeline time: {pipeline_time:.2f} ms)")
 
     def clamp_pose_to_corridor(self, point, corridor_id):
         poly = self.corridor_polygons[corridor_id]
@@ -407,13 +419,20 @@ class PlannerNode(Node):
             goal_clamped = [self.target_point[0], self.target_point[1], self.target_angle or 0.0]
 
         try:
+            # Start timing
+            t_start = time.time()
+
             path, _, _, s = self.plan_motion_node.plan_motion(
-                corridor_list, 
-                np.array(start_clamped), 
-                np.array(goal_clamped), 
+                corridor_list,
+                np.array(start_clamped),
+                np.array(goal_clamped),
                 None
             )
-            
+
+            # Calculate and log planning time
+            planning_time = (time.time() - t_start) * 1000  # Convert to milliseconds
+            self.get_logger().info(f"Path planning completed in {planning_time:.2f} ms")
+
             if path is not None and len(path) > 0:
                 self.publish_planned_path(path)
             else:

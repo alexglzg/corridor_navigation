@@ -12,7 +12,14 @@ from linemap import LineMap
 # FILENAME = "Corridor-MapDataset/Scale Maps/Small Scale/few_rows.png"
 # FILENAME = "Corridor-MapDataset/Scale Maps/Small Scale/structured_map_2.pgm"
 # FILENAME = "Corridor-MapDataset/Scale Maps/Small Scale/structured_rows.pgm"
-FILENAME = "Corridor-MapDataset/Real Maps/gazebo_map/map.pgm"
+# FILENAME = "Corridor-MapDataset/Real Maps/gazebo_map/map.pgm"
+# FILENAME = "Corridor-MapDataset/Interesting Maps/populated_grid_map.pgm"
+
+FILENAME = "Corridor-MapDataset/Interesting Maps/gmap_.pgm"
+
+# map_5 misses a door
+# map_8 misses subpart of a room
+# map_17 has diagonals
 
 THRESHOLD = 250  # PNG
 
@@ -25,6 +32,7 @@ def main():
     path = f'{FILENAME}'
 
     floor_plan = LineMap(path, threshold=THRESHOLD, debug=DEBUG)
+    # floor_plan = LineMap(path, threshold=THRESHOLD, debug=DEBUG, resolution=0.05)
 
     # floor_plan.process(structured=False, expect_obstacles=False)
     # floor_plan.process(structured=False, expect_obstacles=True)

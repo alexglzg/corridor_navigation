@@ -1,6 +1,6 @@
 import time
 from collections import defaultdict
-from typing import cast, Dict, Any, Set
+from typing import cast, Dict, Any, Set, Tuple
 
 from .graph import Graph
 from .line import Line
@@ -20,7 +20,7 @@ class LineMap(Map):
     represents one room block.
     """
 
-    def __init__(self, filename: str = None, threshold: int = 250, debug: (bool, int) = False, image: np.ndarray = None, resolution: float = 0.05, robot_clearance: float = 0.3) -> None:
+    def __init__(self, filename: str = None, threshold: int = 250, debug: (bool, int) = False, image: np.ndarray = None, resolution: float = 0.01, robot_clearance: float = 0.3, redundancy_threshold: float = 0.90) -> None:
         """
         Initialize a LineMap for extracting rectangular room layouts.
 
@@ -28,6 +28,14 @@ class LineMap(Map):
           filename (str): path to a binary (black‐and‐white) floor-plan image file.
           threshold (int): grayscale threshold for binarization in the base Map constructor.
           image (np.ndarray): alternative image input (grayscale) instead of filename.
+          redundancy_threshold (float): Overlap threshold for filtering redundant rectangles.
+                                        Rectangles with >= this percentage of area overlapping
+                                        with larger rectangles are considered redundant.
+                                        Default: 0.90 (90% overlap)
+
+                                        Note: This is a simple starting point. If 90% doesn't
+                                        remove enough redundancy, try 0.85 or 0.80. If it removes
+                                        too many valid rectangles, try 0.95.
 
         Behavior:
           1. Validate inputs.
@@ -74,6 +82,7 @@ class LineMap(Map):
 
         self.threshold = threshold
         self.resolution = resolution
+        self.redundancy_threshold = redundancy_threshold
 
 
         if self.debug:
@@ -1590,6 +1599,45 @@ class LineMap(Map):
                     r.half_extents[1] >= self.min_rect_size:
                 self.rectangles.add_node(r)
 
+    def _calculate_overlap_dimensions(self, r1: Rectangle, r2: Rectangle) -> Tuple[float, float]:
+        """
+        Calculate the width and height of overlap between two axis-aligned rectangles.
+
+        Args:
+            r1: First Rectangle object (must be axis-aligned)
+            r2: Second Rectangle object (must be axis-aligned)
+
+        Returns:
+            Tuple[float, float]: (overlap_width, overlap_height) in pixels
+                                 Returns (0, 0) if no overlap
+        """
+        # Get bounding boxes from corners (for axis-aligned rectangles)
+        # Corners are in CCW order: bottom-left, bottom-right, top-right, top-left
+        x_coords_1 = [c[0] for c in r1.corners]
+        y_coords_1 = [c[1] for c in r1.corners]
+        x_coords_2 = [c[0] for c in r2.corners]
+        y_coords_2 = [c[1] for c in r2.corners]
+
+        x0_1, x1_1 = min(x_coords_1), max(x_coords_1)
+        y0_1, y1_1 = min(y_coords_1), max(y_coords_1)
+        x0_2, x1_2 = min(x_coords_2), max(x_coords_2)
+        y0_2, y1_2 = min(y_coords_2), max(y_coords_2)
+
+        # Calculate intersection boundaries
+        x0_int = max(x0_1, x0_2)
+        x1_int = min(x1_1, x1_2)
+        y0_int = max(y0_1, y0_2)
+        y1_int = min(y1_1, y1_2)
+
+        # Check if there's actual overlap
+        if x0_int >= x1_int or y0_int >= y1_int:
+            return (0.0, 0.0)
+
+        overlap_width = x1_int - x0_int
+        overlap_height = y1_int - y0_int
+
+        return (overlap_width, overlap_height)
+
     def generate_edges(self) -> None:
         """
         Add an undirected edge between any two room‐rectangles that overlap.
@@ -1649,7 +1697,16 @@ class LineMap(Map):
 
                 # test overlap on all four axes
                 if _separating_axis_theorem(c1, c2, axes1 + axes2):
-                    self.rectangles.add_edge(r1, r2)
+                    # Calculate overlap dimensions
+                    overlap_width, overlap_height = self._calculate_overlap_dimensions(r1, r2)
+
+                    # Compute minimum traversable dimension based on robot clearance
+                    clearance_pixels = self.min_rect_size * 2  # Convert from half-extent to full size
+
+                    # Only add edge if BOTH dimensions are large enough for robot to traverse
+                    # (A 100×1 pixel overlap has large area but robot can't fit through)
+                    if overlap_width >= clearance_pixels and overlap_height >= clearance_pixels:
+                        self.rectangles.add_edge(r1, r2)
 
     def process(self, structured: bool = False, expect_obstacles: bool = True) -> None:
         """
@@ -1941,6 +1998,31 @@ class LineMap(Map):
                 
         self.generate_edges() # Connectivity remains SAT-based
 
+    @staticmethod
+    def _calculate_intersection_area(rect1, rect2):
+        """Calculate intersection area of two axis-aligned rectangles.
+
+        Args:
+            rect1: tuple (x0, x1, y0, y1) where x0 < x1, y0 < y1
+            rect2: tuple (x0, x1, y0, y1) where x0 < x1, y0 < y1
+
+        Returns:
+            float: Intersection area in pixels^2 (0 if no overlap)
+        """
+        x0_1, x1_1, y0_1, y1_1 = rect1
+        x0_2, x1_2, y0_2, y1_2 = rect2
+
+        # Calculate intersection boundaries
+        x0_int = max(x0_1, x0_2)
+        x1_int = min(x1_1, x1_2)
+        y0_int = max(y0_1, y0_2)
+        y1_int = min(y1_1, y1_2)
+
+        # Check if there's actual overlap
+        if x0_int >= x1_int or y0_int >= y1_int:
+            return 0.0
+
+        return (x1_int - x0_int) * (y1_int - y0_int)
 
     def generate_rects_maximal(self):
         """
@@ -2025,13 +2107,27 @@ class LineMap(Map):
         added_coords = []
         map_bounds = (self.grid_image.shape[1], self.grid_image.shape[0])
         
+        overlap_filtered = 0
         for x0, x1, y0, y1 in final_list:
             is_redundant = False
+            current_area = (x1 - x0) * (y1 - y0)
+
             for ex0, ex1, ey0, ey1 in added_coords:
-                if x0 >= ex0 and x1 <= ex1 and y0 >= ey0 and y1 <= ey1:
+                # Calculate intersection area
+                intersection = self._calculate_intersection_area(
+                    (x0, x1, y0, y1),
+                    (ex0, ex1, ey0, ey1)
+                )
+
+                # Calculate overlap percentage relative to current (smaller) rectangle
+                overlap_percentage = intersection / current_area if current_area > 0 else 0
+
+                # If 90%+ of current rectangle overlaps an existing rectangle, skip it
+                if overlap_percentage >= self.redundancy_threshold:
                     is_redundant = True
+                    overlap_filtered += 1
                     break
-            
+
             if not is_redundant:
                 try:
                     new_rect = Rectangle.from_four_points((x0, y0), (x1, y0), (x1, y1), (x0, y1), map_bounds)
@@ -2048,5 +2144,8 @@ class LineMap(Map):
         print(f"  Final Rectangles: {len(self.rectangles.nodes())}")
         print(f"  Final Edges: {len(self.rectangles.edges())}")
         print(f"  Redundant Rectangles Pruned: {len(final_list) - len(added_coords)}")
+        print(f"    - By overlap (>={self.redundancy_threshold:.0%}): {overlap_filtered}")
+        print(f"    - By size constraint: {len(final_list) - len(added_coords) - overlap_filtered}")
+        print(f"  Overlap threshold: {self.redundancy_threshold:.0%}")
         print(f"  Time taken: {(t_end - t_start) * 1000:.3f} ms")
         print("--------------------------------------------------------------")
