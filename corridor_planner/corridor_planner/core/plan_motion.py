@@ -88,8 +88,8 @@ class PlanMotion:
                 
         else:
             for trajectory_piece in trajectory:
-                num_samples = int(trajectory_piece.maneuver_time / self.sampling_time)
-                trajectory_piece.resample(new_samples_number=max(num_samples, 2))
+                # num_samples = int(trajectory_piece.maneuver_time / self.sampling_time)
+                # trajectory_piece.resample(new_samples_number=max(num_samples, 2))
 
                 pose_traj = np.hstack((
                     trajectory_piece.path_coordinates[:, 0:2], 
