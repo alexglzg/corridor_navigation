@@ -20,7 +20,7 @@ class LineMap(Map):
     represents one room block.
     """
 
-    def __init__(self, filename: str = None, threshold: int = 250, debug: (bool, int) = False, image: np.ndarray = None, resolution: float = 0.01, robot_clearance: float = 0.3, redundancy_threshold: float = 0.90) -> None:
+    def __init__(self, filename: str = None, threshold: int = 250, debug: (bool, int) = False, image: np.ndarray = None, resolution: float = 0.01, robot_clearance: float = 0.3, redundancy_threshold: float = 0.95) -> None:
         """
         Initialize a LineMap for extracting rectangular room layouts.
 
