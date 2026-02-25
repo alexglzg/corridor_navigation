@@ -277,6 +277,8 @@ class PlannerNode(Node):
                         if self.transition_graph.nodes[n1]['region'] and self.transition_graph.nodes[n2]['region']: dist += self.corridor_change_penalty
                         self.transition_graph.add_edge(n1, n2, weight=dist)
                         self.transition_graph.add_edge(n2, n1, weight=dist)
+        # Persistent index: corridor_id → list of node IDs (used every planning call)
+        self.nodes_by_corridor = points_by_corridor
         self.visualize_transition_points()
 
     def is_path_in_corridor(self, pt1, pt2, corridor_id):
@@ -316,62 +318,91 @@ class PlannerNode(Node):
                     self.get_logger().info(f"Complete planning pipeline completed in {pipeline_time:.2f} ms")
                     return
 
-        temp = self.transition_graph.copy()
-        
+        # Add virtual start/end edges directly on the base graph (avoids an O(V+E) copy).
+        # Use nodes_by_corridor index to skip the full node scan (was O(V) per corridor).
+        G = self.transition_graph
         for cid in start_cs:
-            for nid, data in temp.nodes(data=True):
-                if nid not in ['start','end'] and cid in data.get('corridors', set()):
-                    if self.is_path_in_corridor(self.initial_point, data['point'], cid):
-                        temp.add_edge('start', nid, weight=math.dist(self.initial_point, data['point']))
-        
+            for nid in self.nodes_by_corridor.get(cid, []):
+                data = G.nodes[nid]
+                if self.is_path_in_corridor(self.initial_point, data['point'], cid):
+                    G.add_edge('start', nid, weight=math.dist(self.initial_point, data['point']))
+
         for cid in goal_cs:
-            for nid, data in temp.nodes(data=True):
-                if nid not in ['start','end'] and cid in data.get('corridors', set()):
-                    if self.is_path_in_corridor(data['point'], self.target_point, cid):
-                        temp.add_edge(nid, 'end', weight=math.dist(data['point'], self.target_point))
+            for nid in self.nodes_by_corridor.get(cid, []):
+                data = G.nodes[nid]
+                if self.is_path_in_corridor(data['point'], self.target_point, cid):
+                    G.add_edge(nid, 'end', weight=math.dist(data['point'], self.target_point))
 
         try:
-            path = nx.shortest_path(temp, 'start', 'end', weight='weight')
-            
-            waypoints = [self.initial_point]
-            corridor_sequence = []
-            S_list = []
-            
-            for node in path[1:-1]:
-                data = temp.nodes[node]
-                waypoints.append(data['point'])
-                S_list.append(set(data.get('corridors', set())))
-            waypoints.append(self.target_point)
+            path = nx.shortest_path(G, 'start', 'end', weight='weight')
 
-            current_c = next(iter(set(start_cs) & S_list[0])) if (path[1:-1] and (set(start_cs) & S_list[0])) else start_cs[0]
-            corridor_sequence.append(current_c)
+            middle = path[1:-1]
+            self.get_logger().info(
+                f"Dijkstra path ({len(middle)} middle nodes): " +
+                ", ".join(f"{n}={G.nodes[n].get('corridors','?')}" for n in middle)
+            )
 
-            for i, S_curr in enumerate(S_list):
-                S_next = S_list[i+1] if i+1 < len(S_list) else set(goal_cs)
-                if current_c in S_curr:
-                    candidates = (S_curr - {current_c}) & S_next
-                    if candidates:
-                        current_c = next(iter(candidates))
-                        if corridor_sequence[-1] != current_c: corridor_sequence.append(current_c)
-                else:
-                    current_c = next(iter(S_curr & S_next)) if (S_curr & S_next) else next(iter(S_curr))
-                    if corridor_sequence[-1] != current_c: corridor_sequence.append(current_c)
+            # Merge consecutive co-located middle nodes (e.g. two transition nodes at a
+            # 3-way junction whose representative points coincide). Union their corridor
+            # sets so the pairwise intersection step skips the zero-length segment.
+            effective = []  # list of (point, merged_corridors)
+            i = 0
+            while i < len(middle):
+                n = middle[i]
+                pt = G.nodes[n]['point']
+                cs = set(G.nodes[n].get('corridors', set()))
+                j = i + 1
+                while j < len(middle) and math.dist(pt, G.nodes[middle[j]]['point']) < 1e-6:
+                    cs |= set(G.nodes[middle[j]].get('corridors', set()))
+                    j += 1
+                effective.append((pt, cs))
+                i = j
 
-            if goal_cs and current_c not in set(goal_cs):
-                for gc in goal_cs:
-                    if self.G.has_edge(current_c, gc):
-                        corridor_sequence.append(gc); break
+            waypoints = [self.initial_point] + [pt for pt, _ in effective] + [self.target_point]
+
+            def edge_corridor(Si, Sj, prev_c):
+                shared = Si & Sj
+                if not shared:
+                    return prev_c  # degenerate; shouldn't happen with a valid path
+                if prev_c in shared:
+                    return prev_c  # prefer no switch when ambiguous
+                return next(iter(shared))
+
+            S_nodes = [cs for _, cs in effective]
+            edge_corridors = []
+            c = edge_corridor(set(start_cs), S_nodes[0], start_cs[0])
+            edge_corridors.append(c)
+            for i in range(len(S_nodes) - 1):
+                c = edge_corridor(S_nodes[i], S_nodes[i+1], c)
+                edge_corridors.append(c)
+            c = edge_corridor(S_nodes[-1], set(goal_cs), c)
+            edge_corridors.append(c)
+
+            corridor_sequence = [edge_corridors[0]]
+            for c in edge_corridors[1:]:
+                if c != corridor_sequence[-1]:
+                    corridor_sequence.append(c)
+
+            self.get_logger().info(f"Corridor sequence ({len(corridor_sequence)}): {corridor_sequence}")
             
-            self.publish_viz(waypoints, corridor_sequence)
             self.execute_motion_planning(corridor_sequence, waypoints, None, False)
+
+            self.get_logger().info(f"Waypoints: {waypoints}")
 
             # Log total pipeline time (graph search + motion planning)
             pipeline_time = (time.time() - pipeline_start) * 1000
+
+            self.publish_viz(waypoints, corridor_sequence)
+
             self.get_logger().info(f"Complete planning pipeline completed in {pipeline_time:.2f} ms")
 
         except nx.NetworkXNoPath:
             pipeline_time = (time.time() - pipeline_start) * 1000
             self.get_logger().warn(f"No path found. (Pipeline time: {pipeline_time:.2f} ms)")
+        finally:
+            # Remove the virtual start/end edges added for this planning call.
+            G.remove_edges_from(list(G.out_edges('start')))
+            G.remove_edges_from(list(G.in_edges('end')))
 
     def clamp_pose_to_corridor(self, point, corridor_id):
         poly = self.corridor_polygons[corridor_id]
@@ -406,6 +437,11 @@ class PlannerNode(Node):
                     center=[node['pos'][0], node['pos'][1]], 
                     tilt=node['yaw'] + corridor_tilts[i]
                 ))
+
+            # log info corridor tilts in one line
+            self.get_logger().info(f"Corridor tilts: {corridor_tilts}")
+
+
 
         if not corridor_list: return
 

@@ -5,7 +5,7 @@ from linemap import LineMap
 # FILENAME = "Corridor-MapDataset/Interesting Maps/map_7.png"
 # FILENAME = "Corridor-MapDataset/Interesting Maps/map_25.png"
 # FILENAME = "Corridor-MapDataset/Interesting Maps/map_6.png"
-# FILENAME = "Corridor-MapDataset/Scale Maps/Larger Scale/structured_map_20.pgm"
+FILENAME = "Corridor-MapDataset/Scale Maps/Larger Scale/structured_map_20.pgm"
 # FILENAME = "Corridor-MapDataset/Scale Maps/Larger Scale/structured_rows_20.pgm"
 # FILENAME = "Corridor-MapDataset/Scale Maps/Small Scale/room_map_2.pgm"
 # FILENAME = "Corridor-MapDataset/Scale Maps/Small Scale/room_map_10.pgm"
@@ -16,7 +16,7 @@ from linemap import LineMap
 # FILENAME = "Corridor-MapDataset/Interesting Maps/populated_grid_map.pgm"
 
 # FILENAME = "Corridor-MapDataset/Interesting Maps/gmap_.pgm"
-FILENAME = "Corridor-MapDataset/Interesting Maps/map_5.png"
+# FILENAME = "Corridor-MapDataset/Interesting Maps/map_5.png"
 
 # map_5 misses a door
 # map_8 misses subpart of a room
