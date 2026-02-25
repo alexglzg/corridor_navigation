@@ -2,6 +2,9 @@ import numpy as np
 import arena
 from math import pi, cos, sin
 from typing import List, Any, Tuple
+import matplotlib.pyplot as plt
+
+from arena.helpers.plot_helpers import plot_analytical_trajectory
 
 class PlanMotion:
     def __init__(self, logger):
@@ -87,25 +90,47 @@ class PlanMotion:
                 control_path = np.vstack((control_path, [vs_ocp[i], omegas_ocp[i]]))
                 
         else:
-            for trajectory_piece in trajectory:
-                # num_samples = int(trajectory_piece.maneuver_time / self.sampling_time)
-                # trajectory_piece.resample(new_samples_number=max(num_samples, 2))
+            figure, ax = plt.subplots(figsize=(10, 10))
+            ax.set_aspect("equal", adjustable="box")
+            plot_analytical_trajectory(trajectory, figure=figure)
+            plt.show()
+            if isinstance(self.vehicle, arena.Unicycle):
+                self.logger.info("Unicycle vehicle detected.")
+                for trajectory_piece in trajectory:
+                    num_samples = int(trajectory_piece.maneuver_time / self.sampling_time)
+                    trajectory_piece.resample(new_samples_number=max(num_samples, 2))
 
-                pose_traj = np.hstack((
-                    trajectory_piece.path_coordinates[:, 0:2], 
-                    trajectory_piece.theta_trajectory.reshape((-1, 1))
-                ))
+                    pose_traj = np.hstack((
+                        trajectory_piece.path_coordinates[:, 0:2], 
+                        trajectory_piece.theta_trajectory.reshape((-1, 1))
+                    ))
 
-                path = np.vstack((path, pose_traj))
-                
-                if hasattr(trajectory_piece, 'forward_velocity') and hasattr(trajectory_piece, 'angular_velocity'):
-                     control_chunk = np.column_stack([
-                         trajectory_piece.forward_velocity, 
-                         trajectory_piece.angular_velocity
-                     ])
-                     control_path = np.vstack((control_path, control_chunk))
+                    path = np.vstack((path, pose_traj))
+                    
+                    if hasattr(trajectory_piece, 'forward_velocity') and hasattr(trajectory_piece, 'angular_velocity'):
+                        control_chunk = np.column_stack([
+                            trajectory_piece.forward_velocity, 
+                            trajectory_piece.angular_velocity
+                        ])
+                        control_path = np.vstack((control_path, control_chunk))
+            else:
+                self.logger.info("Bicycle vehicle detected.")
+                for trajectory_piece in trajectory:
+                    # logger for debugging trajectory_piece
+                    self.logger.info(f"Trajectory piece: {trajectory_piece}")
+                    # num_samples = int(trajectory_piece.maneuver_time / self.sampling_time)
+                    # trajectory_piece.resample(new_samples_number=max(num_samples, 2))
 
+                    pose_traj = np.hstack((
+                        trajectory_piece.path_coordinates[:, 0:2],
+                        # add a zero
+                        np.zeros((trajectory_piece.path_coordinates.shape[0], 1)) 
+                        # trajectory_piece.theta_trajectory.reshape((-1, 1))
+                    ))
+
+                    path = np.vstack((path, pose_traj))
+                    
         # Snap final point to goal
-        path = np.vstack((path, [vehicle_end_pose[0], vehicle_end_pose[1], vehicle_end_pose[2]]))
+        # path = np.vstack((path, [vehicle_end_pose[0], vehicle_end_pose[1], vehicle_end_pose[2]]))
 
         return path, control_path, trajectory, intersection_detected
