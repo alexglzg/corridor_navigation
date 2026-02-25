@@ -78,7 +78,8 @@ class CorridorGenerator(Node):
 
         try:
             floor_plan = LineMap(image=image, threshold=THRESHOLD, debug=DEBUG, 
-                                 resolution=resolution, robot_clearance=self.robot_clearance)
+                                 resolution=resolution, robot_clearance=self.robot_clearance,
+                                 redundancy_threshold=0.95)
             floor_plan.process_slicing()
 
             self.clear_previous_markers()

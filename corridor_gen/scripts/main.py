@@ -5,7 +5,7 @@ from linemap import LineMap
 # FILENAME = "Corridor-MapDataset/Interesting Maps/map_7.png"
 # FILENAME = "Corridor-MapDataset/Interesting Maps/map_25.png"
 # FILENAME = "Corridor-MapDataset/Interesting Maps/map_6.png"
-# FILENAME = "Corridor-MapDataset/Scale Maps/Larger Scale/structured_map_20.pgm"
+FILENAME = "Corridor-MapDataset/Scale Maps/Larger Scale/structured_map_20.pgm"
 # FILENAME = "Corridor-MapDataset/Scale Maps/Larger Scale/structured_rows_20.pgm"
 # FILENAME = "Corridor-MapDataset/Scale Maps/Small Scale/room_map_2.pgm"
 # FILENAME = "Corridor-MapDataset/Scale Maps/Small Scale/room_map_10.pgm"
@@ -15,7 +15,8 @@ from linemap import LineMap
 # FILENAME = "Corridor-MapDataset/Real Maps/gazebo_map/map.pgm"
 # FILENAME = "Corridor-MapDataset/Interesting Maps/populated_grid_map.pgm"
 
-FILENAME = "Corridor-MapDataset/Interesting Maps/gmap_.pgm"
+# FILENAME = "Corridor-MapDataset/Interesting Maps/gmap_.pgm"
+# FILENAME = "Corridor-MapDataset/Interesting Maps/map_5.png"
 
 # map_5 misses a door
 # map_8 misses subpart of a room
@@ -31,8 +32,9 @@ SAVE = 0
 def main():
     path = f'{FILENAME}'
 
-    floor_plan = LineMap(path, threshold=THRESHOLD, debug=DEBUG)
-    # floor_plan = LineMap(path, threshold=THRESHOLD, debug=DEBUG, resolution=0.05)
+    # floor_plan = LineMap(path, threshold=THRESHOLD, debug=DEBUG)
+    # floor_plan = LineMap(path, threshold=THRESHOLD, debug=DEBUG, resolution=0.05, redundancy_threshold=0.9)
+    floor_plan = LineMap(path, threshold=THRESHOLD, debug=DEBUG, redundancy_threshold=0.95)
 
     # floor_plan.process(structured=False, expect_obstacles=False)
     # floor_plan.process(structured=False, expect_obstacles=True)
