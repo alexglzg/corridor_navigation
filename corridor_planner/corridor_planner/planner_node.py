@@ -342,9 +342,11 @@ class PlannerNode(Node):
                 ", ".join(f"{n}={G.nodes[n].get('corridors','?')}" for n in middle)
             )
 
-            # Merge consecutive co-located middle nodes (e.g. two transition nodes at a
-            # 3-way junction whose representative points coincide). Union their corridor
-            # sets so the pairwise intersection step skips the zero-length segment.
+            # Merge consecutive co-located middle nodes only when the "outer" corridors
+            # (those not in the shared set) are directly adjacent in the corridor graph.
+            # Without this guard, t_A={VA,H} and t_B={H,VB} would be merged into
+            # {VA,H,VB} and the sequence would incorrectly skip H (VA→VB directly),
+            # even though VA and VB are only connected via H.
             effective = []  # list of (point, merged_corridors)
             i = 0
             while i < len(middle):
@@ -353,7 +355,19 @@ class PlannerNode(Node):
                 cs = set(G.nodes[n].get('corridors', set()))
                 j = i + 1
                 while j < len(middle) and math.dist(pt, G.nodes[middle[j]]['point']) < 1e-6:
-                    cs |= set(G.nodes[middle[j]].get('corridors', set()))
+                    cs_next = set(G.nodes[middle[j]].get('corridors', set()))
+                    shared = cs & cs_next
+                    outer_curr = cs - shared
+                    outer_next = cs_next - shared
+                    # Merging skips the shared corridor; only allow if every outer-curr
+                    # corridor is directly adjacent (in self.G) to every outer-next one.
+                    can_skip = all(
+                        self.G.has_edge(a, b) or self.G.has_edge(b, a)
+                        for a in outer_curr for b in outer_next
+                    )
+                    if not can_skip:
+                        break
+                    cs |= cs_next
                     j += 1
                 effective.append((pt, cs))
                 i = j
