@@ -15,7 +15,7 @@ This work corresponds to the paper:
 * `numpy`, `opencv-python`, `shapely`, `networkx`, `scipy`
 
 ### External Dependencies
-This framework relies on the `[kappa-motion-planner](https://github.com/soniadesantis/kappa-motion-planner)` library for core geometric data structures and vehicle models.
+This framework relies on the `kappa-motion-planner` [link](https://github.com/soniadesantis/kappa-motion-planner) library for core geometric data structures and vehicle models.
 
 ## Installation
 
