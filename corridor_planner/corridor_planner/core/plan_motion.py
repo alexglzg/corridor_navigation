@@ -8,7 +8,7 @@ import matplotlib.pylab as plt
 
 
 import numpy as np
-import arena
+import kappa_planner as arena
 from math import pi, cos, sin
 
 class PlanMotion():

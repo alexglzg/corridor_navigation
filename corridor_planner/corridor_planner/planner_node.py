@@ -17,8 +17,8 @@ import time
 
 from nav_msgs.msg import Path
 from .core.plan_motion import PlanMotion
-import arena
-from arena import Corridor
+import kappa_planner as arena
+from kappa_planner import corridor as Corridor
 
 
 @dataclass
