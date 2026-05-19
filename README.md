@@ -15,13 +15,7 @@ This work corresponds to the paper:
 * `numpy`, `opencv-python`, `shapely`, `networkx`, `scipy`
 
 ### External Dependencies
-This framework relies on the `arena` library for core geometric data structures and vehicle models.
-> **Note**: The `arena` library is currently under construction for public release. To install the current development version, use:
-
-```bash
-pip install git+https://gitlab.kuleuven.be/u0153320/arena-framework.git@main
-
-```
+This framework relies on the `[kappa-motion-planner](https://github.com/soniadesantis/kappa-motion-planner)` library for core geometric data structures and vehicle models.
 
 ## Installation
 

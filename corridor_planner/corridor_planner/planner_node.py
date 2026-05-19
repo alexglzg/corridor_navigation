@@ -726,13 +726,9 @@ class PlannerNode(Node):
             current_state = [x0, y0, self.initial_angle]
             desired_state = [x1, y1, self.target_angle if self.target_angle is not None else 0.0]
             
-            # start_time_plan = time.time_ns() // 1000000
             self.path_planned, self.control_path_planned, self.trajectory_planned, _ = \
                 self.plan_motion_node.plan_motion(corridor_list, np.array(current_state), np.array(desired_state), None)
-                # self.plan_motion_node.plan_motion(corridor_list, np.array(current_state), np.array(desired_state), waypoints if not one_corridor else None)
-            # total_time_plan = (time.time_ns() // 1000000) - start_time_plan
-            # self.get_logger().info(f"Planning time: {total_time_plan:.3f} ms")
-            
+                        
             # Send planned path to RViz
             self.publish_planned_path(self.path_planned)
 
