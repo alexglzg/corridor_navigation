@@ -8,7 +8,7 @@ import matplotlib.pylab as plt
 
 
 import numpy as np
-import arena
+import kappa_planner as arena
 from math import pi, cos, sin
 
 class PlanMotion():
@@ -41,8 +41,6 @@ class PlanMotion():
 
         self.motion_planner = arena.MotionPlanner(self.vehicle, [corridor1, corridor2], [0]*3, [0]*3)
 
-        # self.get_logger().info("[PlanMotion] Planner initialized")
-
     def plan_motion(self, corridor_list, vehicle_start_pose, vehicle_end_pose, waypoint_list = None):
         if self.motion_planner is None:
             # self.get_logger().error("Planner not initialized, please run initialize_planner(...) first.")
@@ -53,7 +51,6 @@ class PlanMotion():
 
         if len(corridor_list) > 1:
             trajectory, intersection_detected = self.motion_planner.compute_trajectory_analytical(), False
-            # self.get_logger().info(f"Analytical solution computed in {self.motion_planner.comp_time_analytical_sol*1000:.1f} ms")
 
             if debug:
                 figure = arena.plot_corridors(corridor_list = corridor_list, linestyle = '--', color = 'gray', linewidth = 0.5)
@@ -68,27 +65,13 @@ class PlanMotion():
                         print(f'\n\nTurn {trajectory_piece.turn_direction} for {trajectory_piece.maneuver_time}s of {trajectory_piece.delta_angle * 180 / pi} degrees ')
                 
         elif len(corridor_list) == 1:
-            trajectory, intersection_detected = self.motion_planner.compute_trajectory_ocp_one_corridor(), False
-            t0 = trajectory.t0
-            tf = trajectory.tf
-            time_grid = np.arange(t0, tf, self.sampling_time)
+            self.get_logger().error("One corridor case under development")
+            return
 
-            [x_ocp, y_ocp, theta_ocp, vs_ocp, omegas_ocp] = trajectory.sampler(trajectory.gist, time_grid)
-
-            path = np.empty((0,3))
-            control_path = np.empty((0,2))
-
-            for i in range(len(x_ocp)):
-                path = np.vstack((path, [x_ocp[i], y_ocp[i], theta_ocp[i]]))
-                control_path = np.vstack((control_path, [vs_ocp[i], omegas_ocp[i]]))
-
-            path = np.vstack((path, [vehicle_end_pose[0], vehicle_end_pose[1], vehicle_end_pose[2]])) 
-
-
-            return path, control_path, trajectory, intersection_detected
-
-        # else:
-            # self.get_logger().error("You should provide at least one corridor to the planner")
+        else:
+            self.get_logger().error("You should provide at least one corridor to the planner")
+            return
+        
 
         path = np.empty((0,3))
         control_path = np.empty((0,2))  
