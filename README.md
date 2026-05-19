@@ -15,7 +15,7 @@ This work corresponds to the paper:
 * `numpy`, `opencv-python`, `shapely`, `networkx`, `scipy`
 
 ### External Dependencies
-This framework relies on the [`kappa-motion-planner`](https://github.com/soniadesantis/kappa-motion-planner) library for core geometric data structures and vehicle models. 
+This framework relies on the [`kappa-motion-planner`](https://github.com/soniadesantis/kappa-motion-planner) library for core geometric data structures and vehicle models.
 
 ## Installation
 
@@ -24,7 +24,7 @@ This framework relies on the [`kappa-motion-planner`](https://github.com/soniade
 ```bash
 mkdir -p ~/corridor_ws/src
 cd ~/corridor_ws/src
-git clone [https://github.com/alexglzg/corridor_navigation.git](https://github.com/alexglzg/corridor_navigation.git)
+git clone https://github.com/alexglzg/corridor_navigation.git
 
 ```
 
@@ -33,6 +33,9 @@ git clone [https://github.com/alexglzg/corridor_navigation.git](https://github.c
 ```bash
 cd ~/corridor_ws/src/corridor_navigation
 pip install -r requirements.txt
+
+cd ~/corridor_ws/src
+git clone https://github.com/soniadesantis/kappa-motion-planner.git
 
 cd ~/corridor_ws
 rosdep install --from-paths src --ignore-src -r -y
