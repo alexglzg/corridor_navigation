@@ -56,7 +56,6 @@ def generate_launch_description():
         )
     ])
 
-
 # ros2 launch corridor_bringup full_system.launch.py map_yaml:=/home/alex/arena_ws/src/corridor_bringup/maps/small_rooms/structured_map_2.yaml
 # ros2 launch corridor_bringup full_system.launch.py map_yaml:=/home/alex/arena_ws/src/corridor_bringup/maps/small_rooms/structured_rows.yaml
 # ros2 launch corridor_bringup full_system.launch.py map_yaml:=/home/alex/arena_ws/src/corridor_bringup/maps/large_rooms/structured_rows_20.yaml

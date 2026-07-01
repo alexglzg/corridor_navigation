@@ -1,10 +1,14 @@
 import numpy as np
-import arena
+import kappa_planner as arena
+# import arena
+# print("PLAN_MOTION IS USING arena FROM:", arena.__file__)
+# print("PLAN_MOTION IS USING kappa_planner FROM:", kappa_planner.__file__)
 from math import pi, cos, sin
 from typing import List, Any, Tuple
 import matplotlib.pyplot as plt
 
-from arena.helpers.plot_helpers import plot_analytical_trajectory
+from kappa_planner.helpers.plot_helpers import plot_analytical_trajectory
+# from arena.helpers.plot_helpers import plot_analytical_trajectory
 
 class PlanMotion:
     def __init__(self, logger):
@@ -38,6 +42,61 @@ class PlanMotion:
         self.motion_planner = arena.MotionPlanner(self.vehicle, [corridor1, corridor2], [0]*3, [0]*3)
         self.logger.info("Arena MotionPlanner initialized.")
 
+    def print_planner_inputs(self, corridor_list, vehicle_start_pose, vehicle_end_pose, vehicle):
+        """
+        Return a formatted string representation of the planner inputs.
+        """
+        # Build corridor definitions
+        corridor_defs = [
+            (
+                f"corridor{i} = CorridorWorld("
+                f"{c.width}, {c.height}, {c.center}, {c.tilt})"
+            )
+            for i, c in enumerate(corridor_list, start=1)
+        ]
+        corridors_str = "\n".join(corridor_defs)
+
+        # Build corridor list line
+        corridor_names = ", ".join(
+            f"corridor{i}"
+            for i in range(1, len(corridor_list) + 1)
+        )
+        corridor_list_str = f"corridor_list = [{corridor_names}]"
+
+        # Format start/end poses
+        start_pose_str = f"start_pose = [{', '.join(map(str, vehicle_start_pose))}]"
+        end_pose_str = f"end_pose = [{', '.join(map(str, vehicle_end_pose))}]"
+
+        # Format vehicle definition
+        v = vehicle
+
+        if isinstance(v, arena.Unicycle):
+            vehicle_str = (
+                "vehicle = Unicycle("
+                f"width={v.width}, length={v.length}, v_max={v.v_max}, "
+                f"v_min=0, omega_max={v.omega_max}, omega_min={-v.omega_max})"
+            )
+
+        elif isinstance(v, arena.Bicycle):
+            vehicle_str = (
+                "vehicle = Bicycle([0, 0, 0], "
+                f"width={v.width}, length={v.length}, wheelbase={v.wheelbase}, "
+                f"v_max={v.v_max}, v_min={v.v_min}, "
+                f"delta_max={v.delta_max}, delta_min={v.delta_min})"
+            )
+
+        # Join all parts with newlines
+        return "\n".join(
+            [
+                corridors_str,
+                corridor_list_str,
+                start_pose_str,
+                end_pose_str,
+                vehicle_str,
+            ]
+        )
+
+
     def plan_motion(self, corridor_list, vehicle_start_pose, vehicle_end_pose, waypoint_list=None):
         """
         Updates the existing planner instance and computes trajectory.
@@ -45,6 +104,12 @@ class PlanMotion:
         if self.motion_planner is None:
             self.logger.error("Planner not initialized! Call initialize_planner first.")
             return None, None, None, False
+
+        # inputs_str = self.motion_planner.print_planner_inputs()
+        # self.logger.info("\n" + inputs_str)
+
+        string_inputs = self.print_planner_inputs(corridor_list, vehicle_start_pose, vehicle_end_pose, self.vehicle)
+        self.logger.info("\n" + string_inputs)
 
         self.motion_planner.update(
             vehicle=self.vehicle, 
@@ -54,13 +119,19 @@ class PlanMotion:
             waypoints=waypoint_list[1:-1] if waypoint_list is not None else None
         )
 
+        # inputs_str = self.motion_planner.print_planner_inputs()
+        # self.logger.info("\n" + inputs_str)
+        
         trajectory = None
         intersection_detected = False
 
         try:
             if len(corridor_list) > 1:
+                self.logger.info("Start analytical trajectory computation for multiple corridors.")
                 trajectory = self.motion_planner.compute_trajectory_analytical()
-                # TODO: Bicycle error: Trajectory generation error: 'list' object has no attribute 'maneuver_time'
+                self.logger.info("Analytical trajectory computed for multiple corridors.")
+                self.logger.info(f"Trajectory type: {type(trajectory)}")
+                # TODO:  error: Trajectory generation error: 'list' object has no attribute 'maneuver_time'
                 intersection_detected = False
             elif len(corridor_list) == 1:
                 trajectory = self.motion_planner.compute_trajectory_ocp_one_corridor()
@@ -72,6 +143,8 @@ class PlanMotion:
 
         except Exception as e:
             self.logger.error(f"Arena solver execution failed: {e}")
+            inputs_str = self.motion_planner.print_planner_inputs()
+            self.logger.info("\n" + inputs_str)
             return None, None, None, False
 
         # --- Resampling Logic ---
@@ -90,15 +163,17 @@ class PlanMotion:
                 control_path = np.vstack((control_path, [vs_ocp[i], omegas_ocp[i]]))
                 
         else:
-            figure, ax = plt.subplots(figsize=(10, 10))
-            ax.set_aspect("equal", adjustable="box")
-            plot_analytical_trajectory(trajectory, figure=figure)
-            plt.show()
+            # figure, ax = plt.subplots(figsize=(10, 10))
+            # ax.set_aspect("equal", adjustable="box")
+            # plot_analytical_trajectory(trajectory, figure=figure)
+            # plt.show()
+            
             if isinstance(self.vehicle, arena.Unicycle):
                 self.logger.info("Unicycle vehicle detected.")
                 for trajectory_piece in trajectory:
                     num_samples = int(trajectory_piece.maneuver_time / self.sampling_time)
                     trajectory_piece.resample(new_samples_number=max(num_samples, 2))
+
 
                     pose_traj = np.hstack((
                         trajectory_piece.path_coordinates[:, 0:2], 
@@ -118,6 +193,8 @@ class PlanMotion:
                 for trajectory_piece in trajectory:
                     # logger for debugging trajectory_piece
                     self.logger.info(f"Trajectory piece: {trajectory_piece}")
+                    inputs_str = self.motion_planner.print_planner_inputs()
+                    self.logger.info("\n" + inputs_str)
                     # num_samples = int(trajectory_piece.maneuver_time / self.sampling_time)
                     # trajectory_piece.resample(new_samples_number=max(num_samples, 2))
 

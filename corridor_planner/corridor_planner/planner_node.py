@@ -19,8 +19,10 @@ import time
 
 from nav_msgs.msg import Path
 from .core.plan_motion import PlanMotion
-import arena
-from arena import Corridor
+# import arena
+import kappa_planner as arena
+# from arena import Corridor
+from kappa_planner import corridor as Corridor
 
 @dataclass
 class TransitionRegion:
@@ -45,7 +47,7 @@ class PlannerNode(Node):
                 ('robot_length', 0.237),
                 ('robot_wheelbase', 0.25),
                 ('robot_delta_max', 0.5),
-                ('model_type', 'unicycle'),
+                ('model_type', 'bicycle'),
                 ('sampling_dt', 0.100),
                 ('map_frame', 'map')
             ]
