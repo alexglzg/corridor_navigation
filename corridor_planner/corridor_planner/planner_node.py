@@ -9,20 +9,23 @@ from corridor_navigation_interfaces.srv import GetGraph
 
 import networkx as nx
 import math
+import json
 import tf_transformations
 import numpy as np
 from shapely.geometry import Polygon, Point as ShapelyPoint, LineString
 from shapely.affinity import rotate, translate
+from shapely.ops import nearest_points
 from dataclasses import dataclass
 from typing import Tuple, List, Dict, Optional, Set
 import time
 
 from nav_msgs.msg import Path
 from .core.plan_motion import PlanMotion
-# import arena
 import kappa_planner as arena
-# from arena import Corridor
 from kappa_planner import corridor as Corridor
+
+EPS = 1e-9
+
 
 @dataclass
 class TransitionRegion:
@@ -31,13 +34,11 @@ class TransitionRegion:
     polygon: Polygon
     representative_points: List[Tuple[float, float]]
 
+
 class PlannerNode(Node):
     def __init__(self):
-        super().__init__('corridor_planner_node')
+        super().__init__('corridor_planner')
 
-        # ---------------------------------------------------------
-        # PARAMETERS
-        # ---------------------------------------------------------
         self.declare_parameters(
             namespace='',
             parameters=[
@@ -49,10 +50,15 @@ class PlannerNode(Node):
                 ('robot_delta_max', 0.5),
                 ('model_type', 'bicycle'),
                 ('sampling_dt', 0.100),
-                ('map_frame', 'map')
+                ('map_frame', 'map'),
+                # ---- new tuning knobs ----
+                ('corridor_change_penalty', 0.05),  # small tie-break, keep << shortest meaningful length gap
+                ('redundancy_tol', 0.10),           # min length a corridor must save to be kept (~robot scale)
+                ('max_reroutes', 3),                # bounded safety net; ~never fires at small R
+                ('debug_context', True),            # dump graph_context.json for offline analysis
             ]
         )
-    
+
         self.v_max = self.get_parameter('v_max').value
         self.w_max = self.get_parameter('omega_max').value
         self.robot_width = self.get_parameter('robot_width').value
@@ -62,24 +68,22 @@ class PlannerNode(Node):
         self.model_type = self.get_parameter('model_type').value.lower()
         self.dt = self.get_parameter('sampling_dt').value
         self.map_frame = self.get_parameter('map_frame').value
+        self.corridor_change_penalty = self.get_parameter('corridor_change_penalty').value
+        self.redundancy_tol = self.get_parameter('redundancy_tol').value
+        self.max_reroutes = int(self.get_parameter('max_reroutes').value)
+        self.debug_context = bool(self.get_parameter('debug_context').value)
 
+        # Kept only for clamp_pose_to_corridor (unchanged behaviour).
         self.safety_margin = max(self.robot_width, self.robot_length) / 2.0 + 0.02
         self.clamping = False
 
-        self.get_logger().info(
-            f"Planner initialized: Model={self.model_type}"
-        )
-
-        # ---------------------------------------------------------
-        # STATE VARIABLES
-        # ---------------------------------------------------------
         self.graph = None
         self.G = None
         self.transition_graph = None
         self.corridor_polygons = {}
         self.transition_regions = {}
-        self.corridor_change_penalty = 0.0
-        
+        self.nodes_by_corridor = {}
+
         self.initial_point = (0.0, 0.0)
         self.target_point = None
         self.current_state = None
@@ -91,9 +95,30 @@ class PlannerNode(Node):
         # VEHICLE & PLANNER INIT
         # ---------------------------------------------------------
         self.vehicle = self._create_vehicle_model()
-        
-        # Instantiate PlanMotion
-        self.plan_motion_node = PlanMotion(self.get_logger())        
+
+        # Footprint disk radius r and turning radius R, as functions of the vehicle
+        # (never hard-coded to a specific platform). The incoming corridors are the
+        # FULL free-space rectangles: robot_clearance in the generator only crops
+        # corridors/overlaps too small for the robot, it does not deflate them.
+        if self.model_type == 'bicycle':
+            self.r = self.robot_width / 2.0
+            self.turning_radius = getattr(self.vehicle, 'max_radius', None)
+            if self.turning_radius is None:
+                try:
+                    self.turning_radius = abs(self.robot_wheelbase / math.tan(self.delta_max))
+                except Exception:
+                    self.turning_radius = None
+        else:
+            # Unicycle: enclosing disk, turns on the spot, so no arc/triplet rules.
+            self.r = max(self.robot_width, self.robot_length) / 2.0
+            self.turning_radius = None
+
+        self.get_logger().info(
+            f"Planner initialized: Model={self.model_type}, r={self.r:.3f}, "
+            f"R={self.turning_radius if self.turning_radius is None else round(self.turning_radius, 3)}"
+        )
+
+        self.plan_motion_node = PlanMotion(self.get_logger())
         if self.vehicle:
             self.plan_motion_node.initialize_planner(self.vehicle, sampling_time=self.dt)
 
@@ -101,7 +126,7 @@ class PlannerNode(Node):
         # ROS INTERFACES
         # ---------------------------------------------------------
         self.cli = self.create_client(GetGraph, '/get_graph')
-        
+
         self.path_marker_pub = self.create_publisher(Marker, 'path_marker', 1)
         self.point_marker_pub = self.create_publisher(Marker, 'point_markers', 2)
         self.corridor_marker_pub = self.create_publisher(MarkerArray, 'corridor_markers', 1)
@@ -124,13 +149,13 @@ class PlannerNode(Node):
         try:
             if self.model_type == 'unicycle':
                 return arena.Unicycle(
-                    state=[0.0]*3, width=self.robot_width, length=self.robot_length,
+                    state=[0.0] * 3, width=self.robot_width, length=self.robot_length,
                     v_max=self.v_max, v_min=-self.v_max,
                     omega_max=self.w_max, omega_min=-self.w_max
                 )
             elif self.model_type == 'bicycle':
                 return arena.Bicycle(
-                    state=[0.0]*3, width=self.robot_width, length=self.robot_length,
+                    state=[0.0] * 3, width=self.robot_width, length=self.robot_length,
                     wheelbase=self.robot_wheelbase, v_max=self.v_max, v_min=-self.v_max,
                     delta_max=self.delta_max, delta_min=-self.delta_max
                 )
@@ -141,6 +166,9 @@ class PlannerNode(Node):
             self.get_logger().fatal(f"Failed to create vehicle: {e}")
             return None
 
+    # ---------------------------------------------------------
+    # GRAPH LIFECYCLE
+    # ---------------------------------------------------------
     def request_graph(self):
         future = self.cli.call_async(GetGraph.Request())
         future.add_done_callback(self.on_graph_response)
@@ -153,9 +181,13 @@ class PlannerNode(Node):
             response = future.result()
             self.graph = response.graph
             self.G = self.build_graph_from_msg(response.graph)
+            # STAGE 1: vehicle-specific edge admissibility on the raw rectangle graph.
+            self.apply_edge_admissibility()
+            # STAGE 2: transition regions + graph built only over admissible edges.
             self.compute_transition_regions()
             self.build_transition_graph()
-            self.get_logger().info(f'Graph built: {len(self.G.nodes)} nodes.')
+            self.get_logger().info(f'Graph built: {len(self.G.nodes)} nodes, '
+                                   f'{self.G.number_of_edges()} admissible edges.')
             self.try_plan_path()
         except Exception as e:
             self.get_logger().error(f'Failed to get graph: {e}')
@@ -168,7 +200,7 @@ class PlannerNode(Node):
     def initial_point_callback(self, msg):
         self.initial_point = (msg.x, msg.y)
         self.initial_angle = 0.0
-        self.get_logger().info(f"Initial point set.")
+        self.get_logger().info("Initial point set.")
 
     def target_point_callback(self, msg):
         self.target_point = (msg.x, msg.y)
@@ -214,27 +246,111 @@ class PlannerNode(Node):
                 G.add_edge(edge.from_corridor, edge.to_corridor)
         return G
 
+    # =========================================================
+    # STAGE 1 - EDGE ADMISSIBILITY (vehicle-specific)
+    # =========================================================
+    def apply_edge_admissibility(self):
+        """Prune corridor-graph edges the vehicle cannot actually use.
+
+        Both modes: the shared overlap (gateway) must admit the footprint disk,
+        i.e. its smaller dimension >= 2r. Narrow corridors self-isolate this way
+        because one overlap dimension is bounded by their short width.
+
+        Bicycle only: an orthogonal pair implies a 90-degree turn, so the corner
+        arc must also fit (Sonia's pairwise inequality). Parallel pairs are a
+        straight pass and only need the gateway. A too-tight turn is dropped here,
+        which is exactly why a corridor whose direct gateway is too thin (Claim B's
+        c35 case) survives as a needed connector rather than being pruned later.
+        """
+        for a, b in list(self.G.edges()):
+            if not self._edge_feasible(a, b):
+                self.G.remove_edge(a, b)
+
+    def _edge_feasible(self, a, b) -> bool:
+        gw = self._overlap_gateway(a, b)
+        if gw is None or gw < 2.0 * self.r - 1e-6:
+            return False
+        if self.model_type == 'bicycle' and self._corridor_axis(a) != self._corridor_axis(b):
+            if not self._pairwise_arc_feasible(self._short_width(a), self._short_width(b)):
+                return False
+        return True
+
+    def _pairwise_arc_feasible(self, w1, w2) -> bool:
+        """Sonia's corner-arc feasibility: max(0,R+r-w1)^2 + max(0,R+r-w2)^2 <= (R-r)^2,
+        with w1,w2 >= 2r. Wide channels pass trivially; the narrow rule (w=2r forces
+        the other >= R+r) falls out of the inequality."""
+        R, r = self.turning_radius, self.r
+        if R is None or R <= r:
+            return (w1 >= 2.0 * r - 1e-6) and (w2 >= 2.0 * r - 1e-6)
+        if w1 < 2.0 * r - 1e-6 or w2 < 2.0 * r - 1e-6:
+            return False
+        a = max(0.0, R + r - w1)
+        b = max(0.0, R + r - w2)
+        return a * a + b * b <= (R - r) ** 2 + 1e-9
+
+    # ---- axis-aligned geometry helpers (yaw-independent, read from polygons) ----
+    def _bbox_dims(self, cid) -> Tuple[float, float]:
+        minx, miny, maxx, maxy = self.corridor_polygons[cid].bounds
+        return (maxx - minx, maxy - miny)
+
+    def _corridor_axis(self, cid) -> str:
+        dx, dy = self._bbox_dims(cid)
+        return 'H' if dx >= dy else 'V'
+
+    def _short_width(self, cid) -> float:
+        dx, dy = self._bbox_dims(cid)
+        return min(dx, dy)
+
+    def _overlap_geom(self, a, b):
+        pa, pb = self.corridor_polygons.get(a), self.corridor_polygons.get(b)
+        if pa is None or pb is None or not pa.intersects(pb):
+            return None
+        inter = pa.intersection(pb)
+        if inter.is_empty:
+            return None
+        return inter
+
+    def _overlap_gateway(self, a, b) -> Optional[float]:
+        inter = self._overlap_geom(a, b)
+        if inter is None:
+            return None
+        minx, miny, maxx, maxy = inter.bounds
+        return min(maxx - minx, maxy - miny)
+
+    def _overlap_centroid(self, a, b) -> Optional[Tuple[float, float]]:
+        inter = self._overlap_geom(a, b)
+        if inter is None:
+            return None
+        c = inter.centroid
+        return (c.x, c.y)
+
+    # =========================================================
+    # STAGE 2 - TRANSITION REGIONS AND TRANSITION GRAPH
+    # =========================================================
     def compute_transition_regions(self):
-        self.get_logger().info(f"Computing transition regions for {len(self.G.edges())} edges")
+        self.transition_regions = {}
+        self.get_logger().info(f"Computing transition regions for {self.G.number_of_edges()} admissible edges")
         for edge in self.G.edges():
             c1, c2 = edge
             poly1 = self.corridor_polygons.get(c1)
             poly2 = self.corridor_polygons.get(c2)
-            if not poly1 or not poly2 or not poly1.intersects(poly2): continue
-            
+            if not poly1 or not poly2 or not poly1.intersects(poly2):
+                continue
+
             intersection = poly1.intersection(poly2)
-            if intersection.is_empty: continue
-            
+            if intersection.is_empty:
+                continue
+
             if intersection.geom_type != 'Polygon':
                 if hasattr(intersection, 'centroid'):
                     self.transition_regions[(c1, c2)] = TransitionRegion(c1, c2, None, [(intersection.centroid.x, intersection.centroid.y)])
                 continue
-            
+
             if intersection.area < 0.01:
                 centroid = intersection.centroid
                 self.transition_regions[(c1, c2)] = TransitionRegion(c1, c2, intersection, [(centroid.x, centroid.y)])
                 continue
-            
+
             points = self.generate_transition_points(intersection)
             self.transition_regions[(c1, c2)] = TransitionRegion(c1, c2, intersection, points)
 
@@ -245,221 +361,459 @@ class PlannerNode(Node):
         bounds = intersection.bounds
         if (bounds[2] - bounds[0]) > 0 and (bounds[3] - bounds[1]) > 0:
             points.extend([(bounds[0], bounds[1]), (bounds[2], bounds[1]), (bounds[2], bounds[3]), (bounds[0], bounds[3])])
-        
+
         seen, unique = set(), []
         for pt in points:
             pr = (round(pt[0], 3), round(pt[1], 3))
-            if pr not in seen: seen.add(pr); unique.append(pt)
+            if pr not in seen:
+                seen.add(pr)
+                unique.append(pt)
         return unique
 
     def build_transition_graph(self):
         self.transition_graph = nx.DiGraph()
-        self.transition_graph.add_node('start'); self.transition_graph.add_node('end')
-        
+        self.transition_graph.add_node('start')
+        self.transition_graph.add_node('end')
+
         points_by_corridor = {}
         nc = 0
         for (c1, c2), region in self.transition_regions.items():
             for pt in region.representative_points:
                 nid = f"t_{nc}"; nc += 1
                 self.transition_graph.add_node(nid, point=pt, corridors={c1, c2}, region=(c1, c2))
-                for c in [c1, c2]: points_by_corridor.setdefault(c, []).append(nid)
-        
+                for c in [c1, c2]:
+                    points_by_corridor.setdefault(c, []).append(nid)
+
         for cid, data in self.G.nodes(data=True):
             nid = f"c_{cid}"
             self.transition_graph.add_node(nid, point=data['pos'], corridors={cid}, region=None)
             points_by_corridor.setdefault(cid, []).append(nid)
-        
+
         for cid, nodes in points_by_corridor.items():
             for i, n1 in enumerate(nodes):
-                for n2 in nodes[i+1:]:
+                for n2 in nodes[i + 1:]:
                     pt1 = self.transition_graph.nodes[n1]['point']
                     pt2 = self.transition_graph.nodes[n2]['point']
                     if self.is_path_in_corridor(pt1, pt2, cid):
                         dist = math.dist(pt1, pt2)
-                        if self.transition_graph.nodes[n1]['region'] and self.transition_graph.nodes[n2]['region']: dist += self.corridor_change_penalty
+                        if self.transition_graph.nodes[n1]['region'] and self.transition_graph.nodes[n2]['region']:
+                            dist += self.corridor_change_penalty
                         self.transition_graph.add_edge(n1, n2, weight=dist)
                         self.transition_graph.add_edge(n2, n1, weight=dist)
-        # Persistent index: corridor_id → list of node IDs (used every planning call)
+
         self.nodes_by_corridor = points_by_corridor
         self.visualize_transition_points()
+        if self.debug_context:
+            self._save_graph_context()
 
     def is_path_in_corridor(self, pt1, pt2, corridor_id):
         line = LineString([pt1, pt2])
         poly = self.corridor_polygons[corridor_id]
-        if poly.contains(line): return True
-        try: return poly.intersection(line).length >= 0.999 * line.length
-        except: return False
+        if poly.contains(line):
+            return True
+        try:
+            return poly.intersection(line).length >= 0.999 * line.length
+        except Exception:
+            return False
 
+    # =========================================================
+    # STAGE 0 - CONTAINMENT WITH FOOTPRINT (start/goal selection)
+    # =========================================================
     def find_corridors_containing_point(self, point):
-        return [cid for cid, poly in self.corridor_polygons.items() if poly.contains(ShapelyPoint(point[0], point[1]))]
+        """Corridors whose FOOTPRINT-deflated polygon contains the point, i.e. where
+        a disk of radius r centred at the point fits. Deflating by r is what stops
+        the planner from starting inside a small corridor nested in a larger one when
+        the click sits too close to the small corridor's wall (issue 2)."""
+        p = ShapelyPoint(point[0], point[1])
+        out = []
+        for cid, poly in self.corridor_polygons.items():
+            safe = poly.buffer(-self.r)
+            if not safe.is_empty and safe.contains(p):
+                out.append(cid)
+        return out
 
+    def _clearance(self, cid, point) -> float:
+        poly = self.corridor_polygons[cid]
+        return poly.exterior.distance(ShapelyPoint(point[0], point[1]))
+
+    def _best_corridor(self, candidates, point):
+        """Among containing corridors pick the one with the most footprint clearance,
+        so a click in a big room is not attributed to a thin nested corridor."""
+        return max(candidates, key=lambda cid: self._clearance(cid, point))
+
+    def _nearest_corridor(self, point):
+        p = ShapelyPoint(point[0], point[1])
+        return min(self.corridor_polygons, key=lambda cid: self.corridor_polygons[cid].distance(p))
+
+    # =========================================================
+    # PLANNING ENTRY POINT
+    # =========================================================
     def try_plan_path(self):
-        # Start timing for complete pipeline
-        pipeline_start = time.time()
-
-        if self.G is None or not self.initial_point or not self.target_point: return
+        if self.transition_graph is None or self.target_point is None:
+            return
 
         start_cs = self.find_corridors_containing_point(self.initial_point)
         goal_cs = self.find_corridors_containing_point(self.target_point)
+        if not start_cs:
+            start_cs = [self._nearest_corridor(self.initial_point)]
+        if not goal_cs:
+            goal_cs = [self._nearest_corridor(self.target_point)]
 
-        if not start_cs or not goal_cs:
-            self.get_logger().warn("Start or Goal outside corridors.")
-            return
-
+        # Single-corridor direct case.
         common = set(start_cs) & set(goal_cs)
         if common:
-            for cid in common:
-                if self.is_path_in_corridor(self.initial_point, self.target_point, cid):
-                    self.get_logger().info(f"Direct path in {cid}")
-                    waypoints = [self.initial_point, self.target_point]
-                    self.publish_viz(waypoints, [cid])
-                    self.execute_motion_planning([cid], waypoints, None, True)
+            cid = self._best_corridor(common, self.initial_point)
+            if self.is_path_in_corridor(self.initial_point, self.target_point, cid):
+                waypoints = [self.initial_point, self.target_point]
+                self.execute_motion_planning([cid], waypoints, None, one_corridor=True)
+                self.publish_viz(waypoints, [cid])
+                return
 
-                    # Log total pipeline time
-                    pipeline_time = (time.time() - pipeline_start) * 1000
-                    self.get_logger().info(f"Complete planning pipeline completed in {pipeline_time:.2f} ms")
-                    return
+        t_start = time.time()
+        result = self._plan_sequence(start_cs, goal_cs)
+        self.get_logger().info(f"Corridor search + prune + validate: {(time.time()-t_start)*1000:.2f} ms")
 
-        # Add virtual start/end edges directly on the base graph (avoids an O(V+E) copy).
-        # Use nodes_by_corridor index to skip the full node scan (was O(V) per corridor).
+        if result is None:
+            self.get_logger().warn("No feasible corridor path found.")
+            return
+
+        sequence, tilts, waypoints = result
+        self.execute_motion_planning(sequence, waypoints, None, one_corridor=False, precomputed_tilts=tilts)
+        self.publish_viz(waypoints, sequence)
+
+    def _plan_sequence(self, start_cs, goal_cs):
+        """Search -> prune -> tilt -> validate, with a bounded reroute net.
+
+        The reroute only fires on a genuinely infeasible triple (0 < centerline < 2R),
+        which is empirically ~0% at the current R. It blocks the offending turn's
+        transition region and re-searches. Blocking a whole region is a coarse forbid
+        (it cannot say 'this pair is fine from a different predecessor'); the exact
+        forbid needs the second-order graph, which is the intended large-R upgrade.
+        """
+        blocked: Set[frozenset] = set()
+        for attempt in range(self.max_reroutes + 1):
+            path = self._run_search(start_cs, goal_cs, blocked)
+            if path is None:
+                return None
+
+            # raw corridor sequence + the real entry/exit crossing point per corridor.
+            raw_seq, crossings = self._extract(path, start_cs, goal_cs)
+            if not raw_seq:
+                return None
+
+            # STAGE 4a: drop only corridors that save negligible length vs a direct
+            # neighbour-to-neighbour connection (clips, not shortcut-bearing rooms).
+            kept = self.prune_redundant_corridors(raw_seq, crossings)
+            sequence = [raw_seq[i] for i in kept]
+            ee = [crossings[i] for i in kept]  # each retained corridor keeps its own crossings
+
+            # STAGE 5: tilts from corridor shape (long axis) plus crossing sign.
+            tilts = self.compute_corridor_tilts(sequence, ee)
+            # STAGE 4b: triplet feasibility (bicycle only).
+            bad = self.validate_sequence(sequence, tilts)
+
+            if not bad:
+                waypoints = self._waypoints_from_crossings(ee)
+                self._log_sequence(path, sequence, tilts)
+                return sequence, tilts, waypoints
+
+            k = bad[0]  # middle corridor index of the first infeasible triple
+            pair = frozenset((sequence[k], sequence[k + 1])) if k + 1 < len(sequence) \
+                else frozenset((sequence[k - 1], sequence[k]))
+            blocked.add(pair)
+            self.get_logger().warn(
+                f"Infeasible maneuver at corridor {sequence[k]} "
+                f"(centerline < 2R); blocking {tuple(pair)} and rerouting "
+                f"(attempt {attempt + 1}/{self.max_reroutes})."
+            )
+        self.get_logger().warn("Reroute budget exhausted; no feasible sequence.")
+        return None
+
+    def _run_search(self, start_cs, goal_cs, blocked: Set[frozenset]):
         G = self.transition_graph
+        # Attach virtual start/end to every candidate corridor's transition nodes.
         for cid in start_cs:
             for nid in self.nodes_by_corridor.get(cid, []):
-                data = G.nodes[nid]
-                if self.is_path_in_corridor(self.initial_point, data['point'], cid):
-                    G.add_edge('start', nid, weight=math.dist(self.initial_point, data['point']))
-
+                pt = G.nodes[nid]['point']
+                if self.is_path_in_corridor(self.initial_point, pt, cid):
+                    G.add_edge('start', nid, weight=math.dist(self.initial_point, pt))
         for cid in goal_cs:
             for nid in self.nodes_by_corridor.get(cid, []):
-                data = G.nodes[nid]
-                if self.is_path_in_corridor(data['point'], self.target_point, cid):
-                    G.add_edge(nid, 'end', weight=math.dist(data['point'], self.target_point))
+                pt = G.nodes[nid]['point']
+                if self.is_path_in_corridor(pt, self.target_point, cid):
+                    G.add_edge(nid, 'end', weight=math.dist(pt, self.target_point))
 
+        blocked_nodes = [nid for nid, data in G.nodes(data=True)
+                         if data.get('region') and frozenset(data['region']) in blocked]
+        path = None
         try:
-            path = nx.shortest_path(G, 'start', 'end', weight='weight')
-
-            middle = path[1:-1]
-            self.get_logger().info(
-                f"Dijkstra path ({len(middle)} middle nodes): " +
-                ", ".join(f"{n}={G.nodes[n].get('corridors','?')}" for n in middle)
-            )
-
-            # Merge consecutive co-located middle nodes only when the "outer" corridors
-            # (those not in the shared set) are directly adjacent in the corridor graph.
-            # Without this guard, t_A={VA,H} and t_B={H,VB} would be merged into
-            # {VA,H,VB} and the sequence would incorrectly skip H (VA→VB directly),
-            # even though VA and VB are only connected via H.
-            effective = []  # list of (point, merged_corridors)
-            i = 0
-            while i < len(middle):
-                n = middle[i]
-                pt = G.nodes[n]['point']
-                cs = set(G.nodes[n].get('corridors', set()))
-                j = i + 1
-                while j < len(middle) and math.dist(pt, G.nodes[middle[j]]['point']) < 1e-6:
-                    cs_next = set(G.nodes[middle[j]].get('corridors', set()))
-                    shared = cs & cs_next
-                    outer_curr = cs - shared
-                    outer_next = cs_next - shared
-                    # Merging skips the shared corridor; only allow if every outer-curr
-                    # corridor is directly adjacent (in self.G) to every outer-next one.
-                    can_skip = all(
-                        self.G.has_edge(a, b) or self.G.has_edge(b, a)
-                        for a in outer_curr for b in outer_next
-                    )
-                    if not can_skip:
-                        break
-                    cs |= cs_next
-                    j += 1
-                effective.append((pt, cs))
-                i = j
-
-            waypoints = [self.initial_point] + [pt for pt, _ in effective] + [self.target_point]
-
-            def edge_corridor(Si, Sj, prev_c):
-                shared = Si & Sj
-                if not shared:
-                    return prev_c  # degenerate; shouldn't happen with a valid path
-                if prev_c in shared:
-                    return prev_c  # prefer no switch when ambiguous
-                return next(iter(shared))
-
-            S_nodes = [cs for _, cs in effective]
-            edge_corridors = []
-            c = edge_corridor(set(start_cs), S_nodes[0], start_cs[0])
-            edge_corridors.append(c)
-            for i in range(len(S_nodes) - 1):
-                c = edge_corridor(S_nodes[i], S_nodes[i+1], c)
-                edge_corridors.append(c)
-            c = edge_corridor(S_nodes[-1], set(goal_cs), c)
-            edge_corridors.append(c)
-
-            corridor_sequence = [edge_corridors[0]]
-            for c in edge_corridors[1:]:
-                if c != corridor_sequence[-1]:
-                    corridor_sequence.append(c)
-
-            self.get_logger().info(f"Corridor sequence ({len(corridor_sequence)}): {corridor_sequence}")
-            
-            self.execute_motion_planning(corridor_sequence, waypoints, None, False)
-
-            self.get_logger().info(f"Waypoints: {waypoints}")
-
-            # Log total pipeline time (graph search + motion planning)
-            pipeline_time = (time.time() - pipeline_start) * 1000
-
-            self.publish_viz(waypoints, corridor_sequence)
-
-            self.get_logger().info(f"Complete planning pipeline completed in {pipeline_time:.2f} ms")
-
-        except nx.NetworkXNoPath:
-            pipeline_time = (time.time() - pipeline_start) * 1000
-            self.get_logger().warn(f"No path found. (Pipeline time: {pipeline_time:.2f} ms)")
+            view = nx.restricted_view(G, blocked_nodes, [])
+            path = nx.shortest_path(view, 'start', 'end', weight='weight')
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            path = None
         finally:
-            # Remove the virtual start/end edges added for this planning call.
             G.remove_edges_from(list(G.out_edges('start')))
             G.remove_edges_from(list(G.in_edges('end')))
+        return path
 
-    def clamp_pose_to_corridor(self, point, corridor_id):
-        poly = self.corridor_polygons[corridor_id]
-        safe_poly = poly.buffer(-self.safety_margin)
-        p = ShapelyPoint(point[0], point[1])
-        if safe_poly.is_empty:
-             node = self.G.nodes[corridor_id]
-             return [node['pos'][0], node['pos'][1], 0.0]
-        if safe_poly.contains(p): return [point[0], point[1], 0.0]
-        nearest_pt = safe_poly.exterior.interpolate(safe_poly.exterior.project(p))
-        return [nearest_pt.x, nearest_pt.y, 0.0]
+    def _extract(self, path, start_cs, goal_cs):
+        """Walk the transition-node path, read off the shared corridor per hop, and
+        record where the path actually enters and leaves each corridor. Consecutive
+        segments in the same corridor are merged so a corridor's entry is its first
+        crossing and its exit is its last. Returns (raw_sequence, crossings) where
+        crossings[i] = (entry_point, exit_point) for raw_sequence[i]."""
+        pts, csets = [], []
+        for n in path:
+            if n == 'start':
+                pts.append(self.initial_point); csets.append(set(start_cs))
+            elif n == 'end':
+                pts.append(self.target_point); csets.append(set(goal_cs))
+            else:
+                d = self.transition_graph.nodes[n]
+                pts.append(tuple(d['point'])); csets.append(set(d.get('corridors', set())))
 
-    def execute_motion_planning(self, corridor_sequence, waypoints, waypoint_mapping, one_corridor=False):
+        raw, crossings = [], []
+        prev = None
+        for i in range(len(pts) - 1):
+            sh = csets[i] & csets[i + 1]
+            c = prev if (sh and prev in sh) else (min(sh) if sh else prev)
+            if c is None:
+                continue
+            if raw and raw[-1] == c:
+                crossings[-1] = (crossings[-1][0], pts[i + 1])  # extend exit
+            else:
+                raw.append(c)
+                crossings.append((pts[i], pts[i + 1]))
+            prev = c
+        return raw, crossings
+
+    # =========================================================
+    # STAGE 4a - REDUNDANCY PRUNE
+    # =========================================================
+    def prune_redundant_corridors(self, seq, crossings):
+        """Drop a middle corridor only when routing through it saves negligible path
+        length versus connecting its neighbours directly through their shared overlap.
+        This is the distinction between a genuine shortcut and a clip.
+
+        A room in the middle of the sequence is usually what lets the AP cut a diagonal
+        across it; removing it forces an L and a LONGER trajectory. So the corridor tube
+        exists to give the trajectory room, and more corridors mean shorter paths, not
+        longer. Shortest corridor count is never the goal, shortest trajectory is. The
+        earlier "do the neighbours touch" and "does the crossing land in a neighbour"
+        tests were both wrong: on map_14 the clipped corridor c9 fills a tiny corner
+        that no single corridor nor even the neighbour union covers, so no exact
+        geometric containment can catch it, yet it saves nothing and should go, while
+        the diagonal room c8 has overlapping neighbours too but saves a lot and must
+        stay. Only a length comparison separates them.
+
+        For middle M with predecessor P and successor S, let a be P's entry crossing,
+        e and x be M's entry/exit crossings, and b be S's exit crossing. L_with is the
+        current route a->e->x->b through M. L_without is the shortest a->b that stays in
+        P and S, i.e. the straight segment if it already passes through the P-S overlap,
+        otherwise a bend at the overlap. M is redundant when L_without - L_with is below
+        redundancy_tol, a length on the order of the robot's own size (a shortcut smaller
+        than the vehicle is not worth a corridor). On map_14 this drops only c9 (saves
+        0.03 m); c10's descent (0.30 m) and c8's diagonal (1.92 m) stay, as do the doors
+        c14, c1, c3 whose neighbours do not connect directly.
+
+        We only drop when the P-S edge is admissible, so the resulting adjacency is
+        footprint-feasible. Candidates are removed smallest-saving first, each guarded
+        by a live connectivity check so a removal never breaks the chain. Returns kept
+        indices; a retained corridor keeps its own crossings, so tilts are unaffected.
+        """
+        N = len(seq)
+        if N < 3:
+            return list(range(N))
+
+        candidates = []
+        for k in range(1, N - 1):
+            P, S = seq[k - 1], seq[k + 1]
+            if not self.G.has_edge(P, S):
+                continue
+            a = crossings[k - 1][0]
+            e_mid, x_mid = crossings[k]
+            b = crossings[k + 1][1]
+            saving = self._shortcut_saving(P, S, a, e_mid, x_mid, b)
+            if saving < self.redundancy_tol:
+                candidates.append((saving, k))
+
+        candidates.sort(key=lambda t: t[0])
+        kept = list(range(N))
+        for _, k in candidates:
+            if k not in kept:
+                continue
+            j = kept.index(k)
+            if j == 0 or j == len(kept) - 1:
+                continue
+            if self.G.has_edge(seq[kept[j - 1]], seq[kept[j + 1]]):
+                kept.pop(j)
+        return kept
+
+    def _shortcut_saving(self, P, S, a, e_mid, x_mid, b):
+        """Length saved by keeping the middle corridor: (shortest a->b through P and S
+        only) minus (current a->e->x->b route through the middle). Small means the
+        middle is a clip; large means it carries a real diagonal."""
+        d = math.dist
+        L_with = d(a, e_mid) + d(e_mid, x_mid) + d(x_mid, b)
+        overlap = self.corridor_polygons[P].intersection(self.corridor_polygons[S])
+        if overlap.is_empty:
+            return float('inf')
+        seg = LineString([a, b])
+        if seg.intersects(overlap):
+            L_without = d(a, b)
+        else:
+            g = nearest_points(overlap, seg)[0]
+            L_without = d(a, (g.x, g.y)) + d((g.x, g.y), b)
+        return L_without - L_with
+
+    def _waypoints_from_crossings(self, ee):
+        """Via-points for markers only (the AP consumes the corridor list). Uses the
+        real exit crossing of each corridor, which coincides with the next entry."""
+        wpts = [self.initial_point]
+        for ent, ext in ee[:-1]:
+            wpts.append(ext)
+        wpts.append(self.target_point)
+        return wpts
+
+    # =========================================================
+    # STAGE 5 - TILT ASSIGNMENT (from real crossing points; fixes map_14)
+    # =========================================================
+    def compute_corridor_tilts(self, seq, ee):
+        """Traversal direction through each corridor, snapped to an axis. Two things set
+        the axis: the corridor's own shape and the direction of the crossing.
+
+        An elongated corridor (aspect ratio >= 2) is ALWAYS traversed along its long
+        axis, so the shape fixes the axis and the crossing only picks the sign. This is
+        the aspect-ratio rule from the paper, and it is essential: a strongly vertical
+        corridor the path merely clips (gmap_6 c52, 0.68 x 5.95, nicked at the bottom
+        while moving slightly rightward) would otherwise snap to horizontal from the raw
+        crossing, mislabelling it and leaving the AP with two same-axis corridors and no
+        turn between them. Forcing the long axis restores the H/V alternation Sonia's
+        framework expects, where every consecutive pair is a real 90-degree turn.
+
+        Only genuinely square-ish corridors (a room, aspect < 2) fall back to the raw
+        crossing direction, since they have no dominant axis. map_14 c8 (a 13.8 x 5.0
+        room, aspect 2.8) is forced horizontal and the leftward crossing gives pi, the
+        same correct value as before. The old centre-based tilt flipped signs on wide
+        rooms, which the crossing already fixed; this adds the shape term the raw
+        crossing was missing."""
+        tilts = []
+        for cid, (ent, ext) in zip(seq, ee):
+            dx, dy = ext[0] - ent[0], ext[1] - ent[1]
+            w, h = self.G.nodes[cid]['width'], self.G.nodes[cid]['height']
+            if w >= 2.0 * h:          # clearly horizontal: shape fixes axis, crossing the sign
+                tilts.append(0.0 if dx >= 0 else math.pi)
+            elif h >= 2.0 * w:        # clearly vertical
+                tilts.append(math.pi / 2 if dy >= 0 else -math.pi / 2)
+            elif abs(dx) < 1e-9 and abs(dy) < 1e-9:
+                tilts.append(0.0)
+            elif abs(dx) >= abs(dy):  # room: no dominant axis, use the crossing
+                tilts.append(0.0 if dx >= 0 else math.pi)
+            else:
+                tilts.append(math.pi / 2 if dy >= 0 else -math.pi / 2)
+        return tilts
+
+    def _fallback_tilts(self, seq):
+        """Rougher tilt from consecutive-corridor overlap centroids. Only used if
+        execute_motion_planning is ever called without precomputed tilts; the normal
+        path uses compute_corridor_tilts on real crossings."""
+        ee = []
+        n = len(seq)
+        for i, cid in enumerate(seq):
+            ent = self.initial_point if i == 0 else self._overlap_centroid(seq[i - 1], cid)
+            ext = self.target_point if i == n - 1 else self._overlap_centroid(cid, seq[i + 1])
+            ee.append((ent if ent is not None else self.G.nodes[cid]['pos'],
+                       ext if ext is not None else self.G.nodes[cid]['pos']))
+        return self.compute_corridor_tilts(seq, ee)
+
+    # =========================================================
+    # STAGE 4b - TRIPLET FEASIBILITY (bicycle U/S maneuver)
+    # =========================================================
+    def _traversal_axis(self, tilt) -> str:
+        return 'H' if abs(math.cos(tilt)) >= abs(math.sin(tilt)) else 'V'
+
+    def _centerline_distance(self, a, m, b, ta, tm, tb) -> Optional[float]:
+        """Distance between the outer corridors' parallel centerlines, classified by
+        TRAVERSAL axis (so a corridor crossed short-ways is inverted, exactly as
+        Sonia's invert_dimensions). Inverting keeps the centre and flips the axis
+        label, so the distance reduces to |dx| or |dy| between the two centres."""
+        A, M, B = self._traversal_axis(ta), self._traversal_axis(tm), self._traversal_axis(tb)
+        xa, ya = self.G.nodes[a]['pos']
+        xb, yb = self.G.nodes[b]['pos']
+        dx, dy = abs(xa - xb), abs(ya - yb)
+        case = A + M + B
+        if case == 'HVH':
+            return dy
+        if case == 'VHV':
+            return dx
+        if case == 'HHV':
+            return dx
+        if case == 'VVH':
+            return dy
+        if case == 'HVV':
+            return dy
+        if case == 'VHH':
+            return dx
+        if case in ('HHH', 'VVV'):
+            return max(dx, dy)
+        return None
+
+    def validate_sequence(self, seq, tilts):
+        """Return the indices of infeasible middle corridors. A triple is feasible if
+        the outer centerlines are at least 2R apart (room for two arcs). Runs after the
+        prune, so collinear pass-throughs are already gone and only real turns remain."""
+        bad = []
+        if self.model_type != 'bicycle' or self.turning_radius is None:
+            return bad
+        need = 2.0 * self.turning_radius
+        room = need + 2.0 * self.r  # arc diameter plus footprint
+        for i in range(len(seq) - 2):
+            mid = seq[i + 1]
+            mw, mh = self.G.nodes[mid]['width'], self.G.nodes[mid]['height']
+            # Sonia's outer-centerline rule assumes the middle corridor is a narrow
+            # turning passage that pins the vehicle near the two centerlines. A room
+            # wide enough to hold the whole arc does not, so the outer offset is
+            # irrelevant and the turn is always feasible. map_14 c8 (13.8 x 5.0) is
+            # exactly this: the check reads dx = 0.22 between the c1 and c3 centres and
+            # would wrongly reject it, forcing a reroute that drops the diagonal room.
+            if min(mw, mh) >= room:
+                continue
+            d = self._centerline_distance(seq[i], seq[i + 1], seq[i + 2],
+                                          tilts[i], tilts[i + 1], tilts[i + 2])
+            if d is not None and d < need - 1e-6:
+                bad.append(i + 1)
+        return bad
+
+    # =========================================================
+    # HAND-OFF TO ANALYTICAL PLANNER
+    # =========================================================
+    def execute_motion_planning(self, corridor_sequence, waypoints, waypoint_mapping,
+                                one_corridor=False, precomputed_tilts=None):
         corridor_list = []
         if one_corridor:
             for cid in corridor_sequence:
                 node = self.G.nodes[cid]
                 corridor_list.append(Corridor.CorridorWorld(
-                    width=node['height'], height=node['width'], center=[node['pos'][0], node['pos'][1]], tilt=node['yaw']
+                    width=node['height'], height=node['width'],
+                    center=[node['pos'][0], node['pos'][1]], tilt=node['yaw']
                 ))
         else:
-            corridor_tilts = self.compute_corridor_tilts_from_waypoints(corridor_sequence, waypoints, None)
-            if len(corridor_sequence) > 1:
-                corridor_tilts = self.check_first_corridor_tilt(corridor_sequence, waypoints, None, corridor_tilts)
+            corridor_tilts = precomputed_tilts if precomputed_tilts is not None \
+                else self._fallback_tilts(corridor_sequence)
 
             for i, cid in enumerate(corridor_sequence):
                 node = self.G.nodes[cid]
-                hw = np.array([node['width'], node['height']]) 
+                hw = np.array([node['width'], node['height']])
                 h_final, w_final = np.abs(np.dot(self.R(corridor_tilts[i]), hw))
                 corridor_list.append(Corridor.CorridorWorld(
-                    width=w_final, height=h_final, 
-                    center=[node['pos'][0], node['pos'][1]], 
+                    width=w_final, height=h_final,
+                    center=[node['pos'][0], node['pos'][1]],
                     tilt=node['yaw'] + corridor_tilts[i]
                 ))
-
-            # log info corridor tilts in one line
             self.get_logger().info(f"Corridor tilts: {corridor_tilts}")
 
-
-
-        if not corridor_list: return
+        if not corridor_list:
+            return
 
         if self.clamping:
             start_clamped = self.clamp_pose_to_corridor(self.initial_point, corridor_sequence[0])
@@ -471,25 +825,22 @@ class PlannerNode(Node):
             goal_clamped = [self.target_point[0], self.target_point[1], self.target_angle or 0.0]
 
         try:
-            # Start timing
             t_start = time.time()
-
+            # Waypoints intentionally left as None: the AP plans off the corridor list
+            # and start/goal. Pass `waypoints[1:-1]` here if you want to test whether
+            # via-points help the tangent construction.
             path, _, _, s = self.plan_motion_node.plan_motion(
                 corridor_list,
                 np.array(start_clamped),
                 np.array(goal_clamped),
                 None
             )
-
-            # Calculate and log planning time
-            planning_time = (time.time() - t_start) * 1000  # Convert to milliseconds
-            self.get_logger().info(f"Path planning completed in {planning_time:.2f} ms")
+            self.get_logger().info(f"Path planning completed in {(time.time() - t_start) * 1000:.2f} ms")
 
             if path is not None and len(path) > 0:
                 self.publish_planned_path(path)
             else:
                 self.get_logger().warn("Planner solver failed (Empty Path).")
-
         except Exception as e:
             self.get_logger().warn(f"Trajectory generation error: {e}")
 
@@ -499,54 +850,56 @@ class PlannerNode(Node):
     def R(self, theta):
         return np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
 
-    def compute_corridor_tilts_from_waypoints(self, sequence, waypoints, mapping):
-        tilts = []
-        for i, cid in enumerate(sequence):
-            ent, ext = None, None
-            if i == 0:
-                ent = self.initial_point
-                ext = self.find_corridor_exit_point(cid, i, sequence, waypoints)
-            elif i == len(sequence)-1:
-                ent = self.find_corridor_entrance_point(cid, i, sequence, waypoints)
-                ext = self.target_point
-            else:
-                ent = self.find_corridor_entrance_point(cid, i, sequence, waypoints)
-                ext = self.find_corridor_exit_point(cid, i, sequence, waypoints)
-            
-            if ent and ext:
-                dx, dy = ext[0]-ent[0], ext[1]-ent[1]
-                w_h = self.G.nodes[cid]['width'] / self.G.nodes[cid]['height']
-                h_w = self.G.nodes[cid]['height'] / self.G.nodes[cid]['width']
-                
-                if abs(dx) > abs(dy): tilt = 0.0 if dx > 0 else math.pi
-                else: tilt = math.pi/2 if dy > 0 else -math.pi/2
-                
-                if i > 1 and tilt == tilts[-1] == tilts[-2]:
-                    if abs(dx) > abs(dy): tilt = math.pi/2 if dy > 0 else -math.pi/2
-                    else: tilt = 0.0 if dx > 0 else math.pi
-                
-                if w_h > 2.0: tilt = 0.0 if dx > 0 else math.pi
-                elif h_w > 2.0: tilt = math.pi/2 if dy > 0 else -math.pi/2
-            else: tilt = 0.0
-            tilts.append(tilt)
-        return tilts
+    def clamp_pose_to_corridor(self, point, corridor_id):
+        poly = self.corridor_polygons[corridor_id]
+        safe_poly = poly.buffer(-self.safety_margin)
+        p = ShapelyPoint(point[0], point[1])
+        if safe_poly.is_empty:
+            node = self.G.nodes[corridor_id]
+            return [node['pos'][0], node['pos'][1], 0.0]
+        if safe_poly.contains(p):
+            return [point[0], point[1], 0.0]
+        nearest_pt = safe_poly.exterior.interpolate(safe_poly.exterior.project(p))
+        return [nearest_pt.x, nearest_pt.y, 0.0]
 
-    def check_first_corridor_tilt(self, sequence, waypoints, mapping, tilts):
-        if tilts[0] == tilts[1]:
-            ent = self.initial_point
-            ext = self.find_corridor_exit_point(sequence[0], 0, sequence, waypoints)
-            if ent and ext:
-                dx, dy = ext[0]-ent[0], ext[1]-ent[1]
-                tilts[0] = math.pi/2 if dy > 0 else -math.pi/2 if abs(dx) <= abs(dy) else 0.0 if dx > 0 else math.pi
-        return tilts
+    def _log_sequence(self, path, sequence, tilts):
+        middle = [n for n in path if n not in ('start', 'end')]
+        info = ", ".join(
+            f"{n}={set(self.transition_graph.nodes[n]['corridors'])}"
+            for n in middle if self.transition_graph.nodes[n].get('region')
+        )
+        self.get_logger().info(f"Dijkstra path ({len(middle)} middle nodes): {info}")
+        self.get_logger().info(f"Corridor sequence ({len(sequence)}): {sequence}")
 
-    def find_corridor_entrance_point(self, cid, idx, seq, wps):
-        if idx > 0: return self.G.nodes[seq[idx-1]]['pos']
-        return self.initial_point
-
-    def find_corridor_exit_point(self, cid, idx, seq, wps):
-        if idx < len(seq)-1: return self.G.nodes[seq[idx+1]]['pos']
-        return self.target_point
+    def _save_graph_context(self):
+        try:
+            ctx = {
+                "corridor_graph": {
+                    "nodes": [
+                        {"id": cid, "pos": [round(d['pos'][0], 4), round(d['pos'][1], 4)],
+                         "width": round(d['width'], 4), "height": round(d['height'], 4),
+                         "yaw": round(d['yaw'], 6)}
+                        for cid, d in self.G.nodes(data=True)
+                    ],
+                    "edges": [list(e) for e in self.G.edges()],
+                },
+                "transition_graph": {
+                    "nodes": [
+                        ({"id": nid} if d.get('point') is None else
+                         {"id": nid, "point": [round(d['point'][0], 4), round(d['point'][1], 4)],
+                          "corridors": sorted(list(d['corridors'])),
+                          "region": list(d['region']) if d.get('region') else None})
+                        for nid, d in self.transition_graph.nodes(data=True)
+                    ],
+                    "edges": [[u, v, round(dd.get('weight', 0.0), 4)]
+                              for u, v, dd in self.transition_graph.edges(data=True)],
+                },
+            }
+            with open("graph_context.json", "w") as f:
+                json.dump(ctx, f)
+            self.get_logger().info("saved context to graph_context.json")
+        except Exception as e:
+            self.get_logger().warn(f"Could not save graph_context.json: {e}")
 
     # ---------------------------------------------------------
     # VISUALIZATION
@@ -564,20 +917,21 @@ class PlannerNode(Node):
         for p in path:
             pose = PoseStamped()
             pose.pose.position.x, pose.pose.position.y = p[0], p[1]
-            q = tf_transformations.quaternion_from_euler(0,0,p[2])
+            q = tf_transformations.quaternion_from_euler(0, 0, p[2])
             pose.pose.orientation = Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
             msg.poses.append(pose)
         self.planned_path_publisher.publish(msg)
 
     def publish_waypoint_markers(self, waypoints):
         arr = MarkerArray()
-        for i in range(50): arr.markers.append(Marker(action=Marker.DELETE, ns='path_waypoints', id=i))
+        for i in range(50):
+            arr.markers.append(Marker(action=Marker.DELETE, ns='path_waypoints', id=i))
         for i, wp in enumerate(waypoints):
             m = Marker(type=Marker.SPHERE, action=Marker.ADD, ns='path_waypoints', id=i)
             m.header.frame_id = self.map_frame
             m.scale.x = m.scale.y = m.scale.z = 0.15
             m.pose.position.x, m.pose.position.y, m.pose.position.z = wp[0], wp[1], 0.1
-            m.color.r = float(1.0 - 0.5*(i/max(len(waypoints),1)))
+            m.color.r = float(1.0 - 0.5 * (i / max(len(waypoints), 1)))
             m.color.g, m.color.b, m.color.a = 0.5, 0.5, 0.8
             arr.markers.append(m)
         self.waypoint_marker_pub.publish(arr)
@@ -587,7 +941,7 @@ class PlannerNode(Node):
         m.header.frame_id = self.map_frame
         m.scale.x = 0.3
         m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.4, 0.2, 0.1
-        m.points = [Point(x=x, y=y) for x,y in coords]
+        m.points = [Point(x=x, y=y) for x, y in coords]
         self.path_marker_pub.publish(m)
 
     def publish_point_markers(self):
@@ -603,16 +957,16 @@ class PlannerNode(Node):
         arr = MarkerArray()
         for i in range(self.prev_corridor_marker_count):
             arr.markers.append(Marker(action=Marker.DELETE, ns='corridor_sequence', id=i))
-        
+
         for i, cid in enumerate(ids):
             node = G.nodes[cid]
             m = Marker(type=Marker.CUBE, action=Marker.ADD, ns='corridor_sequence', id=i)
             m.header.frame_id = self.map_frame
             m.scale.x, m.scale.y, m.scale.z = node['width'], node['height'], 0.05
-            t = i / max(len(ids)-1, 1)
-            m.color.r, m.color.g, m.color.b, m.color.a = 0.2 + 0.6*t, 0.0, 0.2 + 0.6*(1-t), 0.5
+            t = i / max(len(ids) - 1, 1)
+            m.color.r, m.color.g, m.color.b, m.color.a = 0.2 + 0.6 * t, 0.0, 0.2 + 0.6 * (1 - t), 0.5
             m.pose.position.x, m.pose.position.y, m.pose.position.z = node['pos'][0], node['pos'][1], 0.025
-            q = tf_transformations.quaternion_from_euler(0,0,node['yaw'])
+            q = tf_transformations.quaternion_from_euler(0, 0, node['yaw'])
             m.pose.orientation = Quaternion(x=q[0], y=q[1], z=q[2], w=q[3])
             arr.markers.append(m)
         self.prev_corridor_marker_count = len(ids)
@@ -621,7 +975,8 @@ class PlannerNode(Node):
     def visualize_transition_points(self):
         arr = MarkerArray()
         for i, (nid, data) in enumerate(self.transition_graph.nodes(data=True)):
-            if nid in ['start', 'end'] or 'point' not in data: continue
+            if nid in ['start', 'end'] or 'point' not in data:
+                continue
             m = Marker(type=Marker.SPHERE, action=Marker.ADD, ns='transition_points', id=i)
             m.header.frame_id = self.map_frame
             m.pose.position.x, m.pose.position.y, m.pose.position.z = data['point'][0], data['point'][1], 0.1
@@ -639,6 +994,14 @@ class PlannerNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = PlannerNode()
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()

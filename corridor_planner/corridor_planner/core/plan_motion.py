@@ -193,8 +193,8 @@ class PlanMotion:
                 for trajectory_piece in trajectory:
                     # logger for debugging trajectory_piece
                     self.logger.info(f"Trajectory piece: {trajectory_piece}")
-                    inputs_str = self.motion_planner.print_planner_inputs()
-                    self.logger.info("\n" + inputs_str)
+                    # inputs_str = self.motion_planner.print_planner_inputs()
+                    # self.logger.info("\n" + inputs_str)
                     # num_samples = int(trajectory_piece.maneuver_time / self.sampling_time)
                     # trajectory_piece.resample(new_samples_number=max(num_samples, 2))
 
