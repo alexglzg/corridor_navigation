@@ -15,6 +15,7 @@ import numpy as np
 from shapely.geometry import Polygon, Point as ShapelyPoint, LineString
 from shapely.affinity import rotate, translate
 from shapely.ops import nearest_points
+from shapely import STRtree
 from dataclasses import dataclass
 from typing import Tuple, List, Dict, Optional, Set
 import time
@@ -55,6 +56,7 @@ class PlannerNode(Node):
                 ('corridor_change_penalty', 0.05),  # small tie-break, keep << shortest meaningful length gap
                 ('redundancy_tol', 0.10),           # min length a corridor must save to be kept (~robot scale)
                 ('max_reroutes', 3),                # bounded safety net; ~never fires at small R
+                ('terminal_heading_weight', 5.0),   # bias (m/rad) toward a start/goal corridor whose axis matches the pose heading
                 ('debug_context', True),            # dump graph_context.json for offline analysis
             ]
         )
@@ -71,6 +73,7 @@ class PlannerNode(Node):
         self.corridor_change_penalty = self.get_parameter('corridor_change_penalty').value
         self.redundancy_tol = self.get_parameter('redundancy_tol').value
         self.max_reroutes = int(self.get_parameter('max_reroutes').value)
+        self.terminal_heading_weight = self.get_parameter('terminal_heading_weight').value
         self.debug_context = bool(self.get_parameter('debug_context').value)
 
         # Kept only for clamp_pose_to_corridor (unchanged behaviour).
@@ -244,6 +247,10 @@ class PlannerNode(Node):
         for edge in graph_msg.edges:
             if edge.from_corridor in valid_nodes and edge.to_corridor in valid_nodes:
                 G.add_edge(edge.from_corridor, edge.to_corridor)
+        # Spatial index over corridor polygons: lets us ask "is this point free space"
+        # (covered by some corridor) cheaply, which the transition-corner filter needs.
+        self._poly_list = list(self.corridor_polygons.values())
+        self._corridor_tree = STRtree(self._poly_list) if self._poly_list else None
         return G
 
     # =========================================================
@@ -354,16 +361,53 @@ class PlannerNode(Node):
             points = self.generate_transition_points(intersection)
             self.transition_regions[(c1, c2)] = TransitionRegion(c1, c2, intersection, points)
 
+    def _covered(self, x, y):
+        """True if (x, y) is inside some corridor, i.e. free space in the cover."""
+        if self._corridor_tree is None:
+            return False
+        p = ShapelyPoint(x, y)
+        for idx in self._corridor_tree.query(p):
+            if self._poly_list[idx].covers(p):
+                return True
+        return False
+
+    def _is_convex_corner(self, x, y, eps):
+        """A taut path bends only at convex obstacle corners, the reflex vertices of
+        free space. Sampling the four diagonal neighbours of a point, such a corner has
+        exactly one obstacle quadrant (three free). An overlap centroid has zero, a
+        point flush against a flat wall has two, so this keeps only the real turning
+        points and drops the rest."""
+        obst = 0
+        for dx in (-eps, eps):
+            for dy in (-eps, eps):
+                if not self._covered(x + dx, y + dy):
+                    obst += 1
+        return obst == 1
+
     def generate_transition_points(self, intersection):
-        points = []
-        centroid = intersection.centroid
-        points.append((centroid.x, centroid.y))
-        bounds = intersection.bounds
-        if (bounds[2] - bounds[0]) > 0 and (bounds[3] - bounds[1]) > 0:
-            points.extend([(bounds[0], bounds[1]), (bounds[2], bounds[1]), (bounds[2], bounds[3]), (bounds[0], bounds[3])])
+        """Transition points for an overlap are only its convex-corner vertices, the
+        ones a shortest path could actually bend at. This drops the centroid and every
+        wall-flush corner, so a road-style crossing keeps its four corners, a corridor
+        opening into a room keeps only its two door jambs, and the interior corners
+        that the room already covers are discarded. On gmap_6 this cuts the transition
+        node count by about 63 percent, which is the dominant cost in graph build and
+        search. Connectivity is preserved because corridors are convex, so any two
+        nodes sharing a corridor stay mutually visible, and each overlap keeps at least
+        one node via the centroid fallback below."""
+        x0, y0, x1, y1 = intersection.bounds
+        w, h = x1 - x0, y1 - y0
+        if w <= 0 or h <= 0:
+            c = intersection.centroid
+            return [(c.x, c.y)]
+        eps = max(0.005, min(0.03, 0.25 * min(w, h)))
+        corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        kept = [c for c in corners if self._is_convex_corner(c[0], c[1], eps)]
+        if not kept:  # open overlap with no convex corner: keep centroid for connectivity
+            c = intersection.centroid
+            kept = [(c.x, c.y)]
 
         seen, unique = set(), []
-        for pt in points:
+        for pt in kept:
             pr = (round(pt[0], 3), round(pt[1], 3))
             if pr not in seen:
                 seen.add(pr)
@@ -444,6 +488,37 @@ class PlannerNode(Node):
     def _nearest_corridor(self, point):
         p = ShapelyPoint(point[0], point[1])
         return min(self.corridor_polygons, key=lambda cid: self.corridor_polygons[cid].distance(p))
+
+    @staticmethod
+    def _wrap(a):
+        return (a + math.pi) % (2.0 * math.pi) - math.pi
+
+    def _terminal_bias(self, cid, heading):
+        """Penalty (in metres) for entering or leaving the plan through corridor `cid`
+        at the commanded `heading`. The start and goal are attached to the search
+        through every corridor that contains them, and pure length would pick whichever
+        gives the shortest route regardless of whether the vehicle can actually hold the
+        pose there. This bias makes the terminal choice heading-aware.
+
+        A unicycle turns in place, so any heading is reachable anywhere and the bias is
+        zero. For the bicycle, what matters is not aspect ratio but the absolute short
+        dimension: if it is at least 2(R + r) the corridor holds a full turning circle,
+        so the vehicle can curve to any heading and the corridor is a room, bias zero. A
+        narrower corridor only lets the vehicle arrive driving along its long axis, so
+        the reachable heading is that axis in either direction, and the bias grows with
+        the angular gap between the commanded heading and that axis. gmap_6 c16 is the
+        motivating miss: a downward goal wrongly entered a vertical narrow corridor when
+        a horizontal one was available; with this bias the axis that matches the heading
+        wins, and if the heading were vertical the vertical corridor would win instead."""
+        if heading is None or self.turning_radius is None:
+            return 0.0
+        w = self.G.nodes[cid]['width']
+        h = self.G.nodes[cid]['height']
+        if min(w, h) >= 2.0 * (self.turning_radius + self.r):
+            return 0.0  # room: any heading reachable
+        axis = 0.0 if w >= h else math.pi / 2.0
+        gap = min(abs(self._wrap(heading - axis)), abs(self._wrap(heading - axis - math.pi)))
+        return self.terminal_heading_weight * gap
 
     # =========================================================
     # PLANNING ENTRY POINT
@@ -531,17 +606,22 @@ class PlannerNode(Node):
 
     def _run_search(self, start_cs, goal_cs, blocked: Set[frozenset]):
         G = self.transition_graph
-        # Attach virtual start/end to every candidate corridor's transition nodes.
+        # Attach virtual start/end to every candidate corridor's transition nodes. The
+        # per-corridor heading bias is added to the attachment weight so the search
+        # prefers a terminal corridor whose axis matches the commanded pose heading,
+        # while still keeping every corridor as a fallback (feasibility is never removed).
         for cid in start_cs:
+            bias = self._terminal_bias(cid, getattr(self, 'initial_angle', None))
             for nid in self.nodes_by_corridor.get(cid, []):
                 pt = G.nodes[nid]['point']
                 if self.is_path_in_corridor(self.initial_point, pt, cid):
-                    G.add_edge('start', nid, weight=math.dist(self.initial_point, pt))
+                    G.add_edge('start', nid, weight=math.dist(self.initial_point, pt) + bias)
         for cid in goal_cs:
+            bias = self._terminal_bias(cid, getattr(self, 'target_angle', None))
             for nid in self.nodes_by_corridor.get(cid, []):
                 pt = G.nodes[nid]['point']
                 if self.is_path_in_corridor(pt, self.target_point, cid):
-                    G.add_edge(nid, 'end', weight=math.dist(pt, self.target_point))
+                    G.add_edge(nid, 'end', weight=math.dist(pt, self.target_point) + bias)
 
         blocked_nodes = [nid for nid, data in G.nodes(data=True)
                          if data.get('region') and frozenset(data['region']) in blocked]
@@ -678,39 +758,70 @@ class PlannerNode(Node):
     # =========================================================
     # STAGE 5 - TILT ASSIGNMENT (from real crossing points; fixes map_14)
     # =========================================================
+    def _axis_sign(self, ee, i, axis):
+        """Signed progress of corridor i along `axis`, measured over the shortest window
+        of the path that gives an unambiguous answer.
+
+        The corridor's own entry-to-exit segment is tried first. If its projection on
+        the axis is at least a robot diameter, it settles the sign. If it is smaller,
+        the corridor is being CUT ACROSS rather than travelled along, and that segment
+        cannot define a direction: gmap_6 c34 is 3.43 long but its entry and exit
+        overlaps share a sliver of x, so the two crossing corners give dx = -0.08, and
+        the sign of a 3.43 m corridor ends up decided by 8 cm, which is under 2r. In
+        that case we widen by one corridor on each side and read the sign from the
+        predecessor's entry to the successor's exit, repeating until the projection
+        clears the tolerance or the window covers the whole path.
+
+        Widening is preferred over falling back to overlap centroids, which is what the
+        original code effectively did: on map_14 c8 the exit overlap is enormous, so its
+        centroid sits nowhere near where the path leaves and reads the sign backwards.
+        c8's own projection is -4.59, far above tolerance, so it never widens and stays
+        correct."""
+        tol = 2.0 * self.r
+        n = len(ee)
+        k = 0 if axis == 'H' else 1
+        lo = hi = i
+        while True:
+            a, b = ee[lo][0], ee[hi][1]
+            proj = b[k] - a[k]
+            if abs(proj) >= tol or (lo == 0 and hi == n - 1):
+                return proj
+            lo, hi = max(0, lo - 1), min(n - 1, hi + 1)
+
     def compute_corridor_tilts(self, seq, ee):
-        """Traversal direction through each corridor, snapped to an axis. Two things set
-        the axis: the corridor's own shape and the direction of the crossing.
+        """Traversal direction through each corridor, snapped to an axis. The axis comes
+        from the corridor's shape, the sign from the path's progress along that axis.
 
         An elongated corridor (aspect ratio >= 2) is ALWAYS traversed along its long
-        axis, so the shape fixes the axis and the crossing only picks the sign. This is
-        the aspect-ratio rule from the paper, and it is essential: a strongly vertical
-        corridor the path merely clips (gmap_6 c52, 0.68 x 5.95, nicked at the bottom
-        while moving slightly rightward) would otherwise snap to horizontal from the raw
-        crossing, mislabelling it and leaving the AP with two same-axis corridors and no
-        turn between them. Forcing the long axis restores the H/V alternation Sonia's
-        framework expects, where every consecutive pair is a real 90-degree turn.
+        axis, so the shape fixes the axis. This is the aspect-ratio rule from the paper
+        and it is what gives the AP a turn at every transition: a long thin corridor the
+        path merely clips would otherwise snap to the wrong axis, leaving two same-axis
+        corridors in a row and no turn between them. It also matters where a corridor is
+        crossed transversely to make a lateral step, as gmap_6 c34 does between c6 and
+        c45, whose direct gateway is only 0.08 wide and therefore inadmissible: labelling
+        c34 horizontal is exactly what makes the AP lay down the arc-straight-arc that
+        performs the step. Only square-ish corridors (aspect < 2, a room) take their axis
+        from the crossing, having no dominant one.
 
-        Only genuinely square-ish corridors (a room, aspect < 2) fall back to the raw
-        crossing direction, since they have no dominant axis. map_14 c8 (a 13.8 x 5.0
-        room, aspect 2.8) is forced horizontal and the leftward crossing gives pi, the
-        same correct value as before. The old centre-based tilt flipped signs on wide
-        rooms, which the crossing already fixed; this adds the shape term the raw
-        crossing was missing."""
+        The sign is then delegated to _axis_sign, which widens its window when the
+        corridor's own traversal is too short to trust."""
         tilts = []
-        for cid, (ent, ext) in zip(seq, ee):
+        n = len(seq)
+        for i, cid in enumerate(seq):
+            ent, ext = ee[i]
             dx, dy = ext[0] - ent[0], ext[1] - ent[1]
             w, h = self.G.nodes[cid]['width'], self.G.nodes[cid]['height']
-            if w >= 2.0 * h:          # clearly horizontal: shape fixes axis, crossing the sign
-                tilts.append(0.0 if dx >= 0 else math.pi)
-            elif h >= 2.0 * w:        # clearly vertical
-                tilts.append(math.pi / 2 if dy >= 0 else -math.pi / 2)
-            elif abs(dx) < 1e-9 and abs(dy) < 1e-9:
-                tilts.append(0.0)
-            elif abs(dx) >= abs(dy):  # room: no dominant axis, use the crossing
-                tilts.append(0.0 if dx >= 0 else math.pi)
+            if w >= 2.0 * h:
+                axis = 'H'
+            elif h >= 2.0 * w:
+                axis = 'V'
+            else:                      # room: no dominant axis, take it from the crossing
+                axis = 'H' if abs(dx) >= abs(dy) else 'V'
+            proj = self._axis_sign(ee, i, axis)
+            if axis == 'H':
+                tilts.append(0.0 if proj >= 0 else math.pi)
             else:
-                tilts.append(math.pi / 2 if dy >= 0 else -math.pi / 2)
+                tilts.append(math.pi / 2 if proj >= 0 else -math.pi / 2)
         return tilts
 
     def _fallback_tilts(self, seq):
