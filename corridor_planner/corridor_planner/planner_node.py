@@ -439,32 +439,24 @@ class PlannerNode(Node):
             self.transition_graph.add_node(nid, point=data['pos'], corridors={cid}, region=None)
             points_by_corridor.setdefault(cid, []).append(nid)
 
+        # Every node listed under a corridor lies inside it, and corridors are convex
+        # rectangles, so the segment between any two of them is inside that corridor by
+        # construction. Sharing a corridor IS mutual visibility; there is nothing to test.
         for cid, nodes in points_by_corridor.items():
             for i, n1 in enumerate(nodes):
                 for n2 in nodes[i + 1:]:
                     pt1 = self.transition_graph.nodes[n1]['point']
                     pt2 = self.transition_graph.nodes[n2]['point']
-                    if self.is_path_in_corridor(pt1, pt2, cid):
-                        dist = math.dist(pt1, pt2)
-                        if self.transition_graph.nodes[n1]['region'] and self.transition_graph.nodes[n2]['region']:
-                            dist += self.corridor_change_penalty
-                        self.transition_graph.add_edge(n1, n2, weight=dist)
-                        self.transition_graph.add_edge(n2, n1, weight=dist)
+                    dist = math.dist(pt1, pt2)
+                    if self.transition_graph.nodes[n1]['region'] and self.transition_graph.nodes[n2]['region']:
+                        dist += self.corridor_change_penalty
+                    self.transition_graph.add_edge(n1, n2, weight=dist)
+                    self.transition_graph.add_edge(n2, n1, weight=dist)
 
         self.nodes_by_corridor = points_by_corridor
         self.visualize_transition_points()
         if self.debug_context:
             self._save_graph_context()
-
-    def is_path_in_corridor(self, pt1, pt2, corridor_id):
-        line = LineString([pt1, pt2])
-        poly = self.corridor_polygons[corridor_id]
-        if poly.contains(line):
-            return True
-        try:
-            return poly.intersection(line).length >= 0.999 * line.length
-        except Exception:
-            return False
 
     # =========================================================
     # STAGE 0 - CONTAINMENT WITH FOOTPRINT (start/goal selection)
@@ -499,46 +491,102 @@ class PlannerNode(Node):
     def _wrap(a):
         return (a + math.pi) % (2.0 * math.pi) - math.pi
 
-    def _terminal_entry_ok(self, T, nid, heading, point):
-        """Can the vehicle hold a pose with `heading` at `point` in narrow terminal
-        corridor T, entering or leaving through transition node `nid`?
+    def _heading_gap_to_axis(self, cid, heading):
+        """Angular deviation of `heading` from the NEAREST of the corridor's two axis
+        directions. At most 90 degrees, since an axis points both ways."""
+        w = self.G.nodes[cid]['width']
+        h = self.G.nodes[cid]['height']
+        axis = 0.0 if w >= h else math.pi / 2.0
+        return min(abs(self._wrap(heading - axis)),
+                   abs(self._wrap(heading - axis - math.pi)))
 
-        A room, or a unicycle, holds any heading: passes. In a narrow corridor the
-        heading is pinned to the axis. An entry from a PARALLEL corridor is a straight
-        in or reverse move, always fine, and already vouched for by the Stage 1 two and
-        three corridor checks (HV, VH, VHV, HVH) plus the pose lying inside the shrunk
-        corridor. An entry from an ORTHOGONAL corridor must arc from that corridor's
-        axis onto T's. If the target lies on the arc's own side (front parking) the arc
-        ends on the already validated pose, so there is nothing to check. If it lies on
-        the far side, the arc first drives AWAY to establish the heading and then
-        reverses back, and that outward tangent must clear T's far wall.
+    def _hold_width(self, delta):
+        """Corridor width needed to reach a heading `delta` off the axis. The vehicle
+        rides the axis and swings off it with one arc of radius R; turning by delta
+        pushes its centre sideways by R(1 - cos delta), and the centre owns W - 2r of
+        lateral room, hence W >= 2r + R(1 - cos delta)."""
+        return 2.0 * self.r + self.turning_radius * (1.0 - math.cos(delta))
+
+    def _free_width(self):
+        """Width at which a corridor can hold EVERY heading: the delta = 90 degree case
+        of _hold_width, i.e. 2r + R. Not 2(R + r), which is the same formula at delta =
+        180 and therefore demands room to reverse direction with a single arc. A terminal
+        pose never needs that, because the vehicle approaches along whichever of the two
+        axis directions is nearer, so the deviation never exceeds a quarter turn. That
+        factor-of-two overcharge is what made c45 (0.81 wide, needing only 0.59) refuse
+        every off-axis heading."""
+        return 2.0 * self.r + self.turning_radius
+
+    def _can_hold_heading(self, cid, heading):
+        """Whether corridor `cid` can hold a pose at `heading`."""
+        if heading is None or self.turning_radius is None:
+            return True
+        w, h = self.G.nodes[cid]['width'], self.G.nodes[cid]['height']
+        return min(w, h) >= self._hold_width(self._heading_gap_to_axis(cid, heading)) - 1e-9
+
+    def _holdable_heading(self, cid, heading):
+        """Closest heading to `heading` that corridor `cid` can actually hold: the axis
+        direction nearest `heading`, opened up by the largest deviation the width allows."""
+        w, h = self.G.nodes[cid]['width'], self.G.nodes[cid]['height']
+        axis = 0.0 if w >= h else math.pi / 2.0
+        base = min((axis, self._wrap(axis + math.pi)),
+                   key=lambda a: abs(self._wrap(heading - a)))
+        slack = min(w, h) - 2.0 * self.r
+        if slack <= 0.0 or self.turning_radius is None:
+            return base
+        c = 1.0 - slack / self.turning_radius
+        if c <= -1.0:
+            return heading                      # every deviation fits
+        d_max = math.acos(max(-1.0, min(1.0, c)))
+        off = self._wrap(heading - base)
+        return self._wrap(base + math.copysign(min(abs(off), d_max), off))
+
+    def _terminal_entry_ok(self, T, nid, heading, point, is_goal=True):
+        """Can the vehicle hold a pose with `heading` at `point` in narrow terminal
+        corridor T, entering (is_goal) or leaving (start) through transition node `nid`?
+
+        A corridor holding a full turning circle, 2(R + r) across, lets the vehicle
+        reposition anywhere inside it, so where it entered cannot pin the pose and the
+        test is skipped. Note this is NOT _free_width(): that is 2r + R and answers a
+        different question, whether the corridor can HOLD a heading, which is about
+        swinging off the axis. Reaching a particular POSITION from a particular entry is
+        a longitudinal question and needs the full circle. Conflating the two let c49
+        (0.60 wide, just over 2r + R = 0.59) skip the test entirely.
+
+        A unicycle passes too. In a narrower corridor the heading is pinned to the axis.
+        An entry from a PARALLEL corridor is a straight in or reverse move, always fine,
+        and already vouched for by the Stage 1 two and three corridor checks (HV, VH,
+        VHV, HVH) plus the pose lying inside the shrunk corridor. An entry from an
+        ORTHOGONAL corridor must arc between the two axes, and the arc moves the vehicle
+        R along T's axis, so the tangent that joins the arc to the straight run is offset
+        from N by R.
+
+        Start and goal are MIRRORS of one another and must not share a formula. At a goal
+        the vehicle arcs first and then drives to the pose, so the tangent has to land
+        BEFORE the pose. At a start it drives away from the pose first and then arcs, so
+        the tangent has to land AFTER it. Everything else is identical, so the start is
+        handled by flipping f. Applying the goal form to a start is what made c16 refuse
+        its own exit into c12: it demanded a tangent at y = 5.40 behind a pose at
+        y = 4.60, when the vehicle simply drives up to y = 4.99 and turns.
 
         The entry corridor's EDGE along T's axis is used, not its centreline, since the
-        vehicle may sit anywhere across N with r clearance and start the arc from the
-        most favourable position:
+        vehicle may sit anywhere across N with r clearance and take the most favourable
+        line:
 
-            heading toward -axis (f = -1):  N_far  - r - R >= T_near_wall + r
-            heading toward +axis (f = +1):  N_near + r + R <= T_far_wall  - r
+            f = -1:  N_far  - r - R >= limit
+            f = +1:  N_near + r + R <= limit
 
-        Front parking satisfies this automatically. The test only bites a reverse
-        maneuver whose outward arc would cross the far wall, e.g. a vertical corridor
-        hugging the left end of a narrow horizontal terminal with a pi goal heading.
-        When it prunes the shortest entry, Dijkstra takes the next orthogonal corridor
-        that clears, producing the longer V->H or H->V->H route around the obstacle.
-
-        With allow_reverse_parking False the same inequality is used but the far WALL is
-        replaced by the POSE itself, which demands the arc land on or beyond the pose so
-        the vehicle only ever drives forward onto it. The arc leaves N's axis and meets
-        T's centreline a distance R along the heading, so the reachable tangents span
-        [N_near + r + R, N_far - r + R] (mirrored for -axis); requiring the pose to lie
-        within that span is exactly the forward condition. Since the pose already lies
-        inside the shrunk corridor, this is strictly stronger than the wall test, and it
-        forces the U-turn around the obstacle wherever a forward entry is impossible."""
+        With reverse parking the limit is T's far wall, so the test only bites a maneuver
+        whose outward arc would leave the corridor. With allow_reverse_parking False the
+        limit is the POSE itself, which forces the arc to land on the pose's side and the
+        vehicle to drive only forward onto it. Since the pose lies inside the shrunk
+        corridor the pose limit is strictly stronger than the wall limit, and where no
+        entry satisfies it the search is pushed around the obstacle."""
         if heading is None or self.turning_radius is None:
             return True
         wT, hT = self.G.nodes[T]['width'], self.G.nodes[T]['height']
         if min(wT, hT) >= 2.0 * (self.turning_radius + self.r):
-            return True  # room: any heading reachable
+            return True  # holds a full turning circle: free to reposition, entry is irrelevant
         cs = self.transition_graph.nodes[nid].get('corridors') or set()
         others = [c for c in cs if c != T]
         if not others:
@@ -558,10 +606,12 @@ class PlannerNode(Node):
             f = 1 if math.sin(heading) >= 0 else -1
             Tlo, Thi = cy - hT / 2.0, cy + hT / 2.0
             Nlo, Nhi = ny - hN / 2.0, ny + hN / 2.0
+        if not is_goal:
+            f = -f                         # leaving: the tangent lands after the pose
         if self.allow_reverse_parking:
-            lim_pos, lim_neg = Thi - r, Tlo + r        # arc must clear T's far wall
+            lim_pos, lim_neg = Thi - r, Tlo + r        # arc must stay inside T
         else:
-            g = point[0] if wT >= hT else point[1]     # arc must reach the pose itself
+            g = point[0] if wT >= hT else point[1]     # arc must meet the pose itself
             lim_pos = lim_neg = g
         if f > 0:
             return Nlo + r + R <= lim_pos + 1e-9
@@ -574,22 +624,18 @@ class PlannerNode(Node):
         the pose can be held there. This bias makes the terminal choice heading-aware.
 
         A unicycle turns in place, so any heading is reachable and the bias is zero. For
-        the bicycle, what matters is the absolute short dimension: at least 2(R + r) and
-        the corridor holds a full turning circle, so it is a room and any heading is
-        reachable, bias zero. A narrower corridor is traversed along its long axis, so
-        the reachable heading is that axis in either direction and the bias grows with
-        the gap between the commanded heading and that axis. This is what steers a
-        horizontal goal heading into a horizontal terminal corridor rather than a
-        vertical one."""
+        the bicycle the corridor holds the heading whenever it is wide enough for the
+        arc that swings off the axis by that much, so a corridor that can hold the
+        commanded heading is unpenalised however narrow it is, and one that cannot is
+        penalised by the shortfall between the heading and the closest it can manage.
+        This is what steers a horizontal goal heading into a horizontal terminal corridor
+        rather than a vertical one, without punishing a corridor that is merely narrow."""
         if heading is None or self.turning_radius is None:
             return 0.0
-        w = self.G.nodes[cid]['width']
-        h = self.G.nodes[cid]['height']
-        if min(w, h) >= 2.0 * (self.turning_radius + self.r):
-            return 0.0  # room: any heading reachable
-        axis = 0.0 if w >= h else math.pi / 2.0
-        gap = min(abs(self._wrap(heading - axis)), abs(self._wrap(heading - axis - math.pi)))
-        return self.terminal_heading_weight * gap
+        if self._can_hold_heading(cid, heading):
+            return 0.0
+        return self.terminal_heading_weight * abs(
+            self._wrap(heading - self._holdable_heading(cid, heading)))
 
     # =========================================================
     # PLANNING ENTRY POINT
@@ -631,33 +677,38 @@ class PlannerNode(Node):
         if self.target_angle is None or self.turning_radius is None:
             return True
 
-        # Heading: only a narrow terminal corridor constrains it. If ANY containing
-        # corridor is a room, or holds the heading on its axis, the heading stands.
+        # Heading. A corridor holds the pose if it is wide enough for the arc that swings
+        # off its axis by the commanded deviation, so only a corridor too narrow for that
+        # arc constrains anything. If ANY containing corridor can hold the heading, it
+        # stands. Otherwise take the closest heading the widest candidate can manage.
         cands = self.find_corridors_containing_point(self.target_point) or goal_cs
-        best_gap, best_axis = None, None
+        best = None
         for cid in cands:
-            w, h = self.G.nodes[cid]['width'], self.G.nodes[cid]['height']
-            if min(w, h) >= 2.0 * (self.turning_radius + self.r):
-                return True                    # a room contains it: any heading is fine
-            axis = 0.0 if w >= h else math.pi / 2.0
-            for cand in (axis, self._wrap(axis + math.pi)):
-                gap = abs(self._wrap(self.target_angle - cand))
-                if best_gap is None or gap < best_gap:
-                    best_gap, best_axis = gap, cand
-        if best_gap is None or best_gap <= 0.10:
-            return True                        # heading already lies on a reachable axis
+            if self._can_hold_heading(cid, self.target_angle):
+                return True
+            held = self._holdable_heading(cid, self.target_angle)
+            gap = abs(self._wrap(self.target_angle - held))
+            if best is None or gap < best[0]:
+                best = (gap, held, cid)
+        if best is None:
+            return True
+        gap, held, cid = best
+        if gap <= 0.10:
+            return True                        # within tolerance, leave it alone
 
         if strict:
             self.get_logger().warn(
-                f"Goal heading {math.degrees(self.target_angle):.0f} deg cannot be held in a "
-                f"narrow terminal corridor (nearest reachable {math.degrees(best_axis):.0f} deg); "
+                f"Goal heading {math.degrees(self.target_angle):.0f} deg cannot be held in "
+                f"terminal corridor {cid} (min width {min(self.G.nodes[cid]['width'], self.G.nodes[cid]['height']):.2f} "
+                f"< {self._hold_width(self._heading_gap_to_axis(cid, self.target_angle)):.2f} needed); "
+                f"nearest reachable {math.degrees(held):.0f} deg; "
                 f"refusing (terminal_heading_mode=strict).")
             return False
         self.get_logger().warn(
-            f"Goal heading {math.degrees(self.target_angle):.0f} deg not holdable in narrow "
-            f"terminal corridor; snapped to {math.degrees(best_axis):.0f} deg "
-            f"(corrected by {math.degrees(best_gap):.0f} deg).")
-        self.target_angle = best_axis
+            f"Goal heading {math.degrees(self.target_angle):.0f} deg not holdable in terminal "
+            f"corridor {cid}; snapped to {math.degrees(held):.0f} deg "
+            f"(corrected by {math.degrees(gap):.0f} deg).")
+        self.target_angle = held
         return True
 
     def try_plan_path(self):
@@ -677,15 +728,15 @@ class PlannerNode(Node):
             return
         goal_cs = self.find_corridors_containing_point(self.target_point) or goal_cs
 
-        # Single-corridor direct case.
+        # Single-corridor direct case. Both poses lie in `cid` and it is convex, so the
+        # straight segment between them is inside it.
         common = set(start_cs) & set(goal_cs)
         if common:
             cid = self._best_corridor(common, self.initial_point)
-            if self.is_path_in_corridor(self.initial_point, self.target_point, cid):
-                waypoints = [self.initial_point, self.target_point]
-                self.execute_motion_planning([cid], waypoints, None, one_corridor=True)
-                self.publish_viz(waypoints, [cid])
-                return
+            waypoints = [self.initial_point, self.target_point]
+            self.execute_motion_planning([cid], waypoints, None, one_corridor=True)
+            self.publish_viz(waypoints, [cid])
+            return
 
         t_start = time.time()
         result = self._plan_sequence(start_cs, goal_cs)
@@ -747,7 +798,7 @@ class PlannerNode(Node):
         self.get_logger().warn("Reroute budget exhausted; no feasible sequence.")
         return None
 
-    def _blocked_terminal_nodes(self, cs, heading, point):
+    def _blocked_terminal_nodes(self, cs, heading, point, is_goal):
         """Transition nodes through which a terminal corridor cannot be entered or left
         while holding `point`/`heading`.
 
@@ -767,7 +818,7 @@ class PlannerNode(Node):
         out = set()
         for cid in cs:
             for nid in self.nodes_by_corridor.get(cid, []):
-                if not self._terminal_entry_ok(cid, nid, heading, point):
+                if not self._terminal_entry_ok(cid, nid, heading, point, is_goal):
                     out.add(nid)
         return out
 
@@ -776,21 +827,21 @@ class PlannerNode(Node):
         # Attach virtual start/end to every candidate corridor's transition nodes, with a
         # per-corridor heading bias so the search prefers a terminal corridor whose axis
         # matches the commanded pose heading, while keeping every corridor as a fallback.
+        # The pose lies in `cid` and every node listed under `cid` lies in it too, and it
+        # is convex, so the connecting segment needs no visibility test.
         for cid in start_cs:
             bias = self._terminal_bias(cid, getattr(self, 'initial_angle', None))
             for nid in self.nodes_by_corridor.get(cid, []):
                 pt = G.nodes[nid]['point']
-                if self.is_path_in_corridor(self.initial_point, pt, cid) \
-                        and self._terminal_entry_ok(cid, nid, getattr(self, 'initial_angle', None),
-                                                    self.initial_point):
+                if self._terminal_entry_ok(cid, nid, getattr(self, 'initial_angle', None),
+                                           self.initial_point, False):
                     G.add_edge('start', nid, weight=math.dist(self.initial_point, pt) + bias)
         for cid in goal_cs:
             bias = self._terminal_bias(cid, getattr(self, 'target_angle', None))
             for nid in self.nodes_by_corridor.get(cid, []):
                 pt = G.nodes[nid]['point']
-                if self.is_path_in_corridor(pt, self.target_point, cid) \
-                        and self._terminal_entry_ok(cid, nid, getattr(self, 'target_angle', None),
-                                                    self.target_point):
+                if self._terminal_entry_ok(cid, nid, getattr(self, 'target_angle', None),
+                                           self.target_point, True):
                     G.add_edge(nid, 'end', weight=math.dist(pt, self.target_point) + bias)
 
         blocked_nodes = [nid for nid, data in G.nodes(data=True)
@@ -799,9 +850,9 @@ class PlannerNode(Node):
         # maneuver cannot hold the pose. Node-level, not edge-level: see
         # _blocked_terminal_nodes for why the attachment gate alone leaks.
         blocked_nodes += list(self._blocked_terminal_nodes(
-            goal_cs, getattr(self, 'target_angle', None), self.target_point))
+            goal_cs, getattr(self, 'target_angle', None), self.target_point, True))
         blocked_nodes += list(self._blocked_terminal_nodes(
-            start_cs, getattr(self, 'initial_angle', None), self.initial_point))
+            start_cs, getattr(self, 'initial_angle', None), self.initial_point, False))
         path = None
         try:
             view = nx.restricted_view(G, blocked_nodes, [])
@@ -1042,15 +1093,19 @@ class PlannerNode(Node):
         return tilts
 
     def _pinned_axis_tilt(self, cid, heading):
-        """Tilt forced by a commanded pose in a NARROW corridor, where the vehicle's
-        heading has to lie along the corridor axis: the axis direction closest to
-        `heading`. Returns None for a room, or when there is no heading or no turning
-        radius, leaving the tilt to be inferred from the path."""
+        """Tilt forced by a commanded pose in a corridor too narrow to swing freely off
+        its axis: the axis direction closest to `heading`. There the vehicle must ride
+        the axis in the direction of the pose and can only deviate at the very end, so
+        the traversal direction is dictated by the pose rather than by the crossings.
+        Returns None once the corridor reaches _free_width(), where the vehicle can turn
+        to any heading and the traversal direction is genuinely set by the path, so the
+        tilt must come from _axis_sign instead. Also None when there is no heading or no
+        turning radius."""
         if heading is None or self.turning_radius is None:
             return None
         w, h = self.G.nodes[cid]['width'], self.G.nodes[cid]['height']
-        if min(w, h) >= 2.0 * (self.turning_radius + self.r):
-            return None                     # room: any heading reachable, path decides
+        if min(w, h) >= self._free_width():
+            return None                     # can reorient freely: path decides
         cands = (0.0, math.pi) if w >= h else (math.pi / 2.0, -math.pi / 2.0)
         return min(cands, key=lambda a: abs(self._wrap(heading - a)))
 
